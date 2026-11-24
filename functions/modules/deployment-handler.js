@@ -1,10 +1,12 @@
 import { StorageFactory, STORAGE_TYPES, ensureD1Schema } from '../storage-adapter.js';
 import { RUNTIME_MANIFEST } from '../generated/runtime-manifest.js';
+import { redactSensitiveText } from './security-utils.js';
 import { NODE_PROTOCOL_REGEX } from './utils/node-parser.js';
 import { createErrorResponse, createJsonResponse, JSON_BODY_LIMITS, readJsonWithLimit } from './utils.js';
 import { compileCoreConfig, compileNodeUrls, mergeDeploymentDefaults, normalizeDeploymentDefaults, publicDeploymentDefaults, publicV2Config, resolveBootstrapConfig, resolveV2Config } from './deployment-v2-config.js';
-import { decryptDeploymentConfig, encryptDeploymentConfig } from './deployment-crypto.js';
-import { buildSubscriptionNodeCacheKey } from '../services/subscription-service.js';
+import { decryptDeploymentConfig, encryptDeploymentConfig, validateDeploymentSecret } from './deployment-crypto.js';
+import { DeploymentConfigurationError, deploymentErrorResponse } from './deployment-errors.js';
+import { buildSubscriptionNodeCacheKey, normalizeSubscriptionNodeCacheNodes } from '../services/subscription-service.js';
 import { isDemoView, readDemoData } from './demo-data-handler.js';
 import { hasTrafficUsage, resolveEffectiveTrafficTotal } from './traffic-quota.js';
 import { createDeploymentRepository, DEPLOYMENTS_KEY, OPERATIONS_KEY } from '../services/deployment-repository.js';
@@ -18,6 +20,7 @@ import { DEFAULT_SETTINGS, KV_KEY_SETTINGS } from './config.js';
 import { transformBuiltinSubscriptionDetailed } from './subscription/transformer-factory.js';
 import { determineTargetFormat, isMetaCore } from './subscription/user-agent-utils.js';
 import { reconcileNodeSelection } from './utils/node-fingerprint.js';
+import { normalizeChainNodeUrl, publicChainSummary } from './deployment-chain.js';
 
 const LEGACY_DEPLOYMENTS_KEY = 'tsub_deployments_v1';
 const BOOTSTRAP_TOKEN_PREFIX = 'tsub_bootstrap_token_v2:';
@@ -191,11 +194,12 @@ export async function handleDeploymentDefaultsRequest(request, env) {
     }
     return createErrorResponse('Method Not Allowed', 405);
   } catch (error) {
-    return createErrorResponse(error.message, /DEPLOYMENT_SECRET_KEY/.test(error.message) ? 503 : 400);
+    return deploymentErrorResponse(error, 400);
   }
 }
 
 function summarizeConfig(config) {
+  const chainInbounds = config.inbounds.filter(item => item.outbound === 'chain');
   return {
     schemaVersion: 2,
     runtime: config.runtime,
@@ -213,7 +217,12 @@ function summarizeConfig(config) {
       trafficEnabled: config.subscription.server.traffic.enabled,
       quotaBytes: config.subscription.server.traffic.quotaBytes
     },
-    addressMode: config.subscription.addressMode || 'auto'
+    addressMode: config.subscription.addressMode || 'auto',
+    chain: {
+      count: chainInbounds.length,
+      protocols: [...new Set(chainInbounds.map(item => item.chain?.snapshot?.protocol).filter(Boolean))],
+      sourceTypes: [...new Set(chainInbounds.map(item => item.chain?.source?.type).filter(Boolean))]
+    }
   };
 }
 
@@ -244,6 +253,14 @@ function normalizeOutputLanguage(value) {
 
 function cloneJson(value) { return JSON.parse(JSON.stringify(value)); }
 function missingSecret(value) { return value === '' || value === null || value === undefined || value === '********'; }
+const SERVER_RESTORED_CHAIN = '__tsubServerRestoredChain';
+
+function stripServerChainMarkers(config) {
+  for (const inbound of Array.isArray(config?.inbounds) ? config.inbounds : []) {
+    if (inbound?.chain && typeof inbound.chain === 'object') delete inbound.chain[SERVER_RESTORED_CHAIN];
+  }
+  return config;
+}
 
 function sharedCredentialValue(config, key, protocols) {
   const values = (config.inbounds || [])
@@ -296,7 +313,19 @@ function restoreDeploymentSecrets(requestConfig, sourceConfig, preserveMachineSe
       if (missingSecret(restored.credentials[key]) && source.credentials?.[key]) restored.credentials[key] = source.credentials[key];
     }
     restored.tls ||= {};
-    if (missingSecret(restored.tls.realityPrivateKey) && source.tls?.realityPrivateKey) restored.tls.realityPrivateKey = source.tls.realityPrivateKey;
+    for (const key of ['realityPrivateKey', 'realityPublicKey']) {
+      if (missingSecret(restored.tls[key]) && source.tls?.[key]) restored.tls[key] = source.tls[key];
+    }
+    if (restored.outbound === 'chain' && source.outbound === 'chain' && source.chain) {
+      const requestedSource = restored.chain?.source || {};
+      const sameSource = !requestedSource.type
+        || (requestedSource.type === source.chain.source?.type
+          && (!requestedSource.key || requestedSource.key === source.chain.source?.key));
+      if (sameSource && requestedSource.refresh !== true && (restored.chain?.retainedCredentials === true || !restored.chain?.snapshot?.credentials)) {
+        restored.chain = cloneJson(source.chain);
+        restored.chain[SERVER_RESTORED_CHAIN] = true;
+      }
+    }
     return restored;
   });
 
@@ -364,6 +393,76 @@ function restoreDeploymentSecrets(requestConfig, sourceConfig, preserveMachineSe
   return next;
 }
 
+function restoreSelectiveCloneSecrets(requestConfig, sourceConfig, rawOptions = {}) {
+  const inboundIndexes = Array.isArray(rawOptions?.inboundIndexes)
+    ? rawOptions.inboundIndexes.filter(index => Number.isInteger(index) && index >= 0 && index < 20)
+    : [];
+  const inboundMappings = Array.isArray(rawOptions?.inboundMappings)
+    ? rawOptions.inboundMappings
+      .filter(item => item && typeof item.targetId === 'string' && Number.isInteger(item.sourceIndex) && item.sourceIndex >= 0 && item.sourceIndex < 20)
+      .map(item => ({ targetId: item.targetId.slice(0, 160), sourceIndex: item.sourceIndex }))
+    : [];
+  const options = {
+    credentials: rawOptions?.credentials === true,
+    warpIdentity: rawOptions?.warpIdentity === true,
+    subscription: rawOptions?.subscription === true,
+    chainUpstream: rawOptions?.chainUpstream === true,
+    inboundIndexes,
+    inboundMappings
+  };
+  const next = cloneJson(requestConfig || {});
+  if (options.credentials) {
+    next.defaults ||= {};
+    next.defaults.credentials ||= {};
+    const sourceSharedUuid = sharedCredentialValue(sourceConfig, 'uuid', new Set(['vless', 'vmess', 'tuic']));
+    const sourceSharedPassword = sharedCredentialValue(sourceConfig, 'password', new Set(['trojan', 'hysteria2', 'tuic', 'anytls', 'socks5', 'naive']));
+    if (missingSecret(next.defaults.credentials.uuid) && sourceSharedUuid) next.defaults.credentials.uuid = sourceSharedUuid;
+    if (missingSecret(next.defaults.credentials.password) && sourceSharedPassword) next.defaults.credentials.password = sourceSharedPassword;
+    next.inbounds = (Array.isArray(next.inbounds) ? next.inbounds : []).map((item, index) => {
+      const mappedSourceIndex = options.inboundMappings.find(mapping => mapping.targetId === item.id)?.sourceIndex;
+      const sourceIndex = options.inboundMappings.length
+        ? mappedSourceIndex
+        : (options.inboundIndexes.length ? options.inboundIndexes[index] : index);
+      const source = Number.isInteger(sourceIndex) ? sourceConfig.inbounds?.[sourceIndex] : null;
+      if (!source || source.protocol !== item.protocol) return item;
+      const restored = cloneJson(item);
+      restored.credentials ||= {};
+      for (const key of ['uuid', 'password']) if (missingSecret(restored.credentials[key]) && source.credentials?.[key]) restored.credentials[key] = source.credentials[key];
+      restored.tls ||= {};
+      for (const key of ['realityPrivateKey', 'realityPublicKey']) if (missingSecret(restored.tls[key]) && source.tls?.[key]) restored.tls[key] = source.tls[key];
+      return restored;
+    });
+  }
+  if (options.warpIdentity) {
+    next.warp ||= {};
+    for (const key of ['privateKey', 'peerPublicKey', 'ipv4', 'ipv6', 'endpoint', 'port', 'reserved']) {
+      if (missingSecret(next.warp[key]) && sourceConfig.warp?.[key]) next.warp[key] = cloneJson(sourceConfig.warp[key]);
+    }
+    next.warp.provisioning = sourceConfig.warp?.provisioning || next.warp.provisioning || 'auto';
+    next.warp.acceptedTerms = sourceConfig.warp?.acceptedTerms === true;
+  }
+  if (options.subscription) {
+    next.subscription ||= {};
+    next.subscription.server ||= {};
+    const sourceServer = sourceConfig.subscription?.server || {};
+    for (const key of ['token', 'pushToken', 'pushGeneration']) if (missingSecret(next.subscription.server[key]) && sourceServer[key]) next.subscription.server[key] = sourceServer[key];
+    next.subscription.server.traffic ||= {};
+    if (missingSecret(next.subscription.server.traffic.apiSecret) && sourceServer.traffic?.apiSecret) next.subscription.server.traffic.apiSecret = sourceServer.traffic.apiSecret;
+  }
+  if (options.chainUpstream) {
+    next.inbounds = (Array.isArray(next.inbounds) ? next.inbounds : []).map((item, index) => {
+      const mappedSourceIndex = options.inboundMappings.find(mapping => mapping.targetId === item.id)?.sourceIndex;
+      const sourceIndex = options.inboundMappings.length
+        ? mappedSourceIndex
+        : (options.inboundIndexes.length ? options.inboundIndexes[index] : index);
+      const source = Number.isInteger(sourceIndex) ? sourceConfig.inbounds?.[sourceIndex] : null;
+      if (!source || source.outbound !== 'chain' || !source.chain || item.outbound !== 'chain') return item;
+      return { ...item, chain: { ...cloneJson(source.chain), [SERVER_RESTORED_CHAIN]: true } };
+    });
+  }
+  return next;
+}
+
 async function prepareDeploymentUpdate(storage, deployment, body, env, pendingOperationId = '', action = 'update') {
   if (action === 'reinstall' && !isDeploymentReinstallable(deployment)) throw Object.assign(new Error('Deployment cannot be reinstalled in its current state'), { status: 409 });
   if (action !== 'reinstall' && deployment.status === 'offline') throw Object.assign(new Error('Deployment template is unavailable'), { status: 409 });
@@ -375,7 +474,8 @@ async function prepareDeploymentUpdate(storage, deployment, body, env, pendingOp
   const nextName = String(body.name || deployment.name).trim().slice(0, 120) || deployment.name;
   const sourceConfig = await decryptDeploymentConfig(deployment.encryptedConfig, env);
   const systemDefaults = await readDeploymentDefaults(storage, env);
-  const restoredConfig = restoreDeploymentSecrets(body.config, sourceConfig, true);
+  let restoredConfig = restoreDeploymentSecrets(stripServerChainMarkers(cloneJson(body.config || {})), sourceConfig, true);
+  restoredConfig = await resolveChainSourcesInConfig(restoredConfig, storage, env, deployment.id);
   const configDefaults = mergeDeploymentDefaults(systemDefaults, restoredConfig.defaults || {});
   const config = resolveV2Config(restoredConfig, systemDefaults, { deploymentName: nextName });
   await resolveCloudflareEdgeMetadata(config);
@@ -459,6 +559,242 @@ function normalizeCallbackNodes(lines) {
     if (accepted.length >= MAX_NODES) break;
   }
   return { accepted, rejected };
+}
+
+function deploymentSourceKind(value) {
+  return String(value || '').startsWith('tsub-deployment');
+}
+
+function chainRouteType(name, url) {
+  const value = `${name || ''} ${url || ''}`.toLowerCase();
+  if (/tunnel|argo|trycloudflare/.test(value)) return 'tunnel';
+  if (/cdn|cloudflare/.test(value)) return 'cdn';
+  return 'direct';
+}
+
+async function cachedSubscriptionNodes(storage, subscription) {
+  let cached = await storage.get(buildSubscriptionNodeCacheKey(subscription));
+  if (subscription?.source?.deploymentId && isRowStorage(storage) && storage.db) {
+    const row = await storage.db.prepare('SELECT data FROM deployment_snapshots WHERE deployment_id = ?')
+      .bind(subscription.source.deploymentId).first();
+    if (row?.data) cached = row.data;
+  }
+  return normalizeSubscriptionNodeCacheNodes(cached).filter(node => NODE_PROTOCOL_REGEX.test(node));
+}
+
+async function deploymentChainNodes(storage, deploymentId) {
+  const subscriptions = typeof storage.getAllSubscriptions === 'function'
+    ? await storage.getAllSubscriptions()
+    : await readCollection(storage, 'tsub_subscriptions_v1');
+  const directNodes = subscriptions
+    .filter(item => item?.source?.kind === 'tsub-deployment' && item.source.deploymentId === deploymentId && item.enabled !== false)
+    .map(item => item.url)
+    .filter(Boolean);
+  const airport = subscriptions.find(item => item.id === `tsub_airport_${deploymentId}`);
+  const snapshotNodes = airport ? await cachedSubscriptionNodes(storage, airport) : [];
+  return [...new Set([...directNodes, ...snapshotNodes])];
+}
+
+async function assertChainSourceDeployment(storage, env, deploymentId, currentDeploymentId = '') {
+  if (!deploymentId || deploymentId === currentDeploymentId) throw new Error('不能选择当前部署作为链式上游');
+  const deployment = await findDeployment(storage, deploymentId);
+  if (!deployment || deployment.demo || deployment.schemaVersion !== 2) throw new Error('链式上游部署不可用');
+  const config = await decryptDeploymentConfig(deployment.encryptedConfig, env);
+  if ((config.inbounds || []).some(item => item.outbound === 'chain')) throw new Error('不能选择已经使用链式代理的部署作为上游');
+  return { deployment, config };
+}
+
+async function resolveChainSourceUrl(storage, env, source, currentDeploymentId = '') {
+  const type = String(source?.type || '').toLowerCase();
+  if (type === 'url') {
+    const url = String(source.url || source.link || '').trim();
+    if (!url) throw new Error('请粘贴链式上游节点链接');
+    return { url, source: { type: 'url', key: '', sourceId: '', nodeKey: '', label: source.label || '', routeType: source.routeType || 'direct' } };
+  }
+  const subscriptions = typeof storage.getAllSubscriptions === 'function'
+    ? await storage.getAllSubscriptions()
+    : await readCollection(storage, 'tsub_subscriptions_v1');
+  if (type === 'manual') {
+    const item = subscriptions.find(entry => entry.id === source.sourceId && !/^https?:\/\//i.test(String(entry?.url || '')));
+    if (!item?.url || deploymentSourceKind(item?.source?.kind)) throw new Error('手动链式上游节点不存在');
+    return { url: item.url, source: { type, key: source.key || `manual:${item.id}`, sourceId: item.id, nodeKey: item.id, label: item.name || '', routeType: chainRouteType(item.name, item.url) } };
+  }
+  if (type === 'subscription') {
+    const item = subscriptions.find(entry => entry.id === source.sourceId && /^https?:\/\//i.test(String(entry?.url || '')));
+    if (!item || deploymentSourceKind(item?.source?.kind)) throw new Error('订阅链式上游来源不存在');
+    const nodes = await cachedSubscriptionNodes(storage, item);
+    const index = Number(source.nodeKey);
+    if (!Number.isInteger(index) || index < 0 || index >= nodes.length) throw new Error('订阅链式上游节点已变化，请重新选择');
+    return { url: nodes[index], source: { type, key: source.key || `subscription:${item.id}:${index}`, sourceId: item.id, nodeKey: String(index), label: source.label || item.name || '', routeType: chainRouteType(source.label || item.name, nodes[index]) } };
+  }
+  if (type === 'deployment') {
+    const { deployment } = await assertChainSourceDeployment(storage, env, source.sourceId, currentDeploymentId);
+    const nodes = await deploymentChainNodes(storage, deployment.id);
+    const index = Number(source.nodeKey);
+    if (!Number.isInteger(index) || index < 0 || index >= nodes.length) throw new Error('部署链式上游节点已变化，请重新选择');
+    return { url: nodes[index], source: { type, key: source.key || `deployment:${deployment.id}:${index}`, sourceId: deployment.id, nodeKey: String(index), label: source.label || deployment.name || '', routeType: chainRouteType(source.label || deployment.name, nodes[index]) } };
+  }
+  throw new Error('链式上游来源类型无效');
+}
+
+async function resolveChainSourcesInConfig(rawConfig, storage, env, currentDeploymentId = '') {
+  const config = cloneJson(rawConfig || {});
+  config.inbounds = await Promise.all((Array.isArray(config.inbounds) ? config.inbounds : []).map(async inbound => {
+    if (inbound?.outbound !== 'chain') {
+      if (inbound && typeof inbound === 'object') delete inbound.chain;
+      return inbound;
+    }
+    const restoredByServer = inbound.chain?.[SERVER_RESTORED_CHAIN] === true;
+    if (inbound.chain && typeof inbound.chain === 'object') delete inbound.chain[SERVER_RESTORED_CHAIN];
+    if (restoredByServer && inbound.chain?.snapshot?.credentials && inbound.chain.snapshot.protocol && inbound.chain.snapshot.server) return inbound;
+    const selected = await resolveChainSourceUrl(storage, env, inbound.chain?.source || {}, currentDeploymentId);
+    const normalized = normalizeChainNodeUrl(selected.url, selected.source);
+    return { ...inbound, chain: normalized };
+  }));
+  return config;
+}
+
+function chainSourceItem(normalized, source) {
+  const summary = publicChainSummary(normalized);
+  return {
+    key: source.key,
+    sourceType: source.type,
+    sourceId: source.sourceId,
+    nodeKey: source.nodeKey,
+    name: normalized.snapshot.name,
+    protocol: normalized.snapshot.protocol,
+    address: normalized.snapshot.server,
+    port: normalized.snapshot.port,
+    transport: normalized.snapshot.transport?.type || 'tcp',
+    tlsMode: normalized.snapshot.tls?.mode || 'none',
+    routeType: source.routeType || 'direct',
+    sourceLabel: source.label || '',
+    preview: summary.snapshot
+  };
+}
+
+function paginateChainItems(items, page, pageSize) {
+  const start = (page - 1) * pageSize;
+  return {
+    items: items.slice(start, start + pageSize),
+    page,
+    pageSize,
+    total: items.length,
+    totalPages: Math.max(1, Math.ceil(items.length / pageSize))
+  };
+}
+
+function summarizeChainSourceNodes(nodes, source) {
+  const protocols = [];
+  let nodeCount = 0;
+  for (const [index, node] of nodes.entries()) {
+    try {
+      const normalized = normalizeChainNodeUrl(node, { ...source, nodeKey: String(index) });
+      nodeCount += 1;
+      if (!protocols.includes(normalized.snapshot.protocol)) protocols.push(normalized.snapshot.protocol);
+    } catch { /* omit unsupported nodes from group summaries */ }
+  }
+  return { nodeCount, protocols: protocols.sort() };
+}
+
+function chainSourceGroup(sourceType, sourceId, name, nodes, updatedAt = '') {
+  const summary = summarizeChainSourceNodes(nodes, { type: sourceType, sourceId, label: name || '' });
+  return {
+    sourceType,
+    sourceId,
+    name: String(name || '').slice(0, 160),
+    nodeCount: summary.nodeCount,
+    protocols: summary.protocols,
+    updatedAt: updatedAt || ''
+  };
+}
+
+async function listChainSources(storage, env, request) {
+  const url = new URL(request.url);
+  const currentDeploymentId = String(url.searchParams.get('deploymentId') || '').trim();
+  const requestedSource = String(url.searchParams.get('source') || '').trim().toLowerCase();
+  const view = String(url.searchParams.get('view') || '').trim().toLowerCase();
+  const sourceId = String(url.searchParams.get('sourceId') || '').trim();
+  const protocol = String(url.searchParams.get('protocol') || '').trim().toLowerCase();
+  const query = String(url.searchParams.get('query') || '').trim().toLowerCase();
+  const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '40', 10) || 40));
+  const subscriptions = typeof storage.getAllSubscriptions === 'function'
+    ? await storage.getAllSubscriptions()
+    : await readCollection(storage, 'tsub_subscriptions_v1');
+
+  if (view === 'groups') {
+    const groups = [];
+    if (requestedSource === 'deployment') {
+      const deployments = await listWithLegacyDrafts(storage);
+      for (const deployment of deployments.filter(item => item.schemaVersion === 2 && !item.demo && item.id !== currentDeploymentId)) {
+        try {
+          await assertChainSourceDeployment(storage, env, deployment.id, currentDeploymentId);
+          const nodes = await deploymentChainNodes(storage, deployment.id);
+          if (!nodes.length) continue;
+          const group = chainSourceGroup('deployment', deployment.id, deployment.name, nodes, deployment.updatedAt || deployment.createdAt);
+          if (group.nodeCount) groups.push(group);
+        } catch { /* omit unavailable, empty, current, or chained deployments */ }
+      }
+    } else if (requestedSource === 'subscription') {
+      for (const item of subscriptions.filter(entry => entry.enabled !== false && !deploymentSourceKind(entry?.source?.kind) && /^https?:\/\//i.test(String(entry?.url || '')))) {
+        const nodes = await cachedSubscriptionNodes(storage, item);
+        if (!nodes.length) continue;
+        const group = chainSourceGroup('subscription', item.id, item.name, nodes, item.updatedAt || item.createdAt);
+        if (group.nodeCount) groups.push(group);
+      }
+    } else throw new Error('链式上游分组来源类型无效');
+    const filteredGroups = groups.filter(item => (!protocol || item.protocols.includes(protocol))
+      && (!query || `${item.name} ${item.protocols.join(' ')}`.toLowerCase().includes(query)));
+    return paginateChainItems(filteredGroups, page, pageSize);
+  }
+
+  const items = [];
+  if (!requestedSource || requestedSource === 'manual') {
+    for (const item of subscriptions.filter(entry => entry.enabled !== false && !deploymentSourceKind(entry?.source?.kind) && !/^https?:\/\//i.test(String(entry?.url || '')))) {
+      try {
+        const source = { type: 'manual', key: `manual:${item.id}`, sourceId: item.id, nodeKey: item.id, label: item.name || '', routeType: chainRouteType(item.name, item.url) };
+        items.push(chainSourceItem(normalizeChainNodeUrl(item.url, source), source));
+      } catch { /* omit unsupported manual nodes */ }
+    }
+  }
+  if (!requestedSource || requestedSource === 'subscription') {
+    if (view === 'nodes' && !sourceId) throw new Error('请先选择订阅源');
+    for (const item of subscriptions.filter(entry => entry.enabled !== false && !deploymentSourceKind(entry?.source?.kind) && /^https?:\/\//i.test(String(entry?.url || '')) && (!sourceId || entry.id === sourceId))) {
+      const nodes = await cachedSubscriptionNodes(storage, item);
+      nodes.forEach((node, index) => {
+        try {
+          const source = { type: 'subscription', key: `subscription:${item.id}:${index}`, sourceId: item.id, nodeKey: String(index), label: item.name || '', routeType: chainRouteType(item.name, node) };
+          items.push(chainSourceItem(normalizeChainNodeUrl(node, source), source));
+        } catch { /* omit unsupported subscription nodes */ }
+      });
+    }
+  }
+  if (!requestedSource || requestedSource === 'deployment') {
+    if (view === 'nodes' && !sourceId) throw new Error('请先选择部署');
+    const deployments = await listWithLegacyDrafts(storage);
+    for (const deployment of deployments.filter(item => item.schemaVersion === 2 && !item.demo && item.id !== currentDeploymentId && (!sourceId || item.id === sourceId))) {
+      try {
+        await assertChainSourceDeployment(storage, env, deployment.id, currentDeploymentId);
+        const nodes = await deploymentChainNodes(storage, deployment.id);
+        nodes.forEach((node, index) => {
+          try {
+            const source = { type: 'deployment', key: `deployment:${deployment.id}:${index}`, sourceId: deployment.id, nodeKey: String(index), label: deployment.name || '', routeType: chainRouteType(deployment.name, node) };
+            items.push(chainSourceItem(normalizeChainNodeUrl(node, source), source));
+          } catch { /* omit unsupported deployment nodes */ }
+        });
+      } catch { /* omit unavailable or chained deployments */ }
+    }
+  }
+  const filtered = items.filter(item => (!protocol || item.protocol === protocol)
+    && (!query || `${item.name} ${item.address} ${item.sourceLabel} ${item.protocol}`.toLowerCase().includes(query)));
+  if (view === 'nodes' && sourceId && !filtered.length) {
+    const sourceExists = requestedSource === 'deployment'
+      ? Boolean(await findDeployment(storage, sourceId))
+      : subscriptions.some(item => item.id === sourceId && !deploymentSourceKind(item?.source?.kind));
+    if (!sourceExists) throw new Error('链式上游来源已不存在');
+  }
+  return paginateChainItems(filtered, page, pageSize);
 }
 
 function validTuicCertificatePin(value) {
@@ -869,7 +1205,7 @@ function stableAssetDescriptor(core, env, latest = false) {
     };
   }
   if (!version || Object.values(assets).some(asset => !asset.url || !asset.sha256)) {
-    throw new Error(`${core} 环境变量覆盖不完整，请补齐版本、AMD64/ARM64 URL 和 SHA-256，或删除整组覆盖变量`);
+    throw new DeploymentConfigurationError('DEPLOYMENT_ASSET_OVERRIDE_INCOMPLETE');
   }
   return { version, assets };
 }
@@ -877,9 +1213,9 @@ function stableAssetDescriptor(core, env, latest = false) {
 function resolveAssetDescriptor(core, runtime, env) {
   if (runtime?.channel === 'pinned' && core === runtime.core) {
     let manifest;
-    try { manifest = JSON.parse(env?.TSUB_PINNED_CORE_MANIFEST || '{}'); } catch { throw new Error('TSUB_PINNED_CORE_MANIFEST 不是有效 JSON'); }
+    try { manifest = JSON.parse(env?.TSUB_PINNED_CORE_MANIFEST || '{}'); } catch { throw new DeploymentConfigurationError('DEPLOYMENT_PINNED_MANIFEST_INVALID'); }
     const descriptor = manifest?.[core]?.[runtime.version];
-    if (!descriptor) throw new Error(`Pinned 清单不包含 ${core} ${runtime.version}`);
+    if (!descriptor) throw new DeploymentConfigurationError('DEPLOYMENT_PINNED_ASSET_MISSING');
     return { version: runtime.version, assets: descriptor };
   }
   return stableAssetDescriptor(core, env, runtime?.channel === 'latest' && core === runtime.core);
@@ -887,15 +1223,15 @@ function resolveAssetDescriptor(core, runtime, env) {
 
 function coreAssetLines(core, runtime, env) {
   const descriptor = resolveAssetDescriptor(core, runtime, env);
-  if (!descriptor.version) throw new Error(`${core} 缺少版本环境变量`);
+  if (!descriptor.version) throw new DeploymentConfigurationError('DEPLOYMENT_ASSET_INVALID');
   const lines = [];
   for (const arch of ['AMD64', 'ARM64']) {
     const asset = descriptor.assets?.[arch.toLowerCase()] || {};
     const url = String(asset.url || ''); const hash = String(asset.sha256 || '');
     const format = String(asset.format || 'binary');
     const binaryHash = String(asset.binarySha256 || (format === 'binary' ? hash : ''));
-    if (!/^https:\/\//.test(url) || !/^[0-9a-f]{64}$/i.test(hash)) throw new Error(`${core}/${arch.toLowerCase()} 资产 URL 或 SHA-256 无效`);
-    if (!['binary', 'tar.gz'].includes(format) || !/^[0-9a-f]{64}$/i.test(binaryHash)) throw new Error(`${core}/${arch.toLowerCase()} 资产格式或二进制 SHA-256 无效`);
+    if (!/^https:\/\//.test(url) || !/^[0-9a-f]{64}$/i.test(hash)) throw new DeploymentConfigurationError('DEPLOYMENT_ASSET_INVALID');
+    if (!['binary', 'tar.gz'].includes(format) || !/^[0-9a-f]{64}$/i.test(binaryHash)) throw new DeploymentConfigurationError('DEPLOYMENT_ASSET_INVALID');
     lines.push(
       `${core}_${arch.toLowerCase()}_url=${url}`, `${core}_${arch.toLowerCase()}_sha256=${hash}`,
       `${core}_${arch.toLowerCase()}_format=${format}`, `${core}_${arch.toLowerCase()}_binary_sha256=${binaryHash}`
@@ -928,6 +1264,15 @@ export function compileBootstrapConfig(config, callbackToken, callbackUrl, deplo
   const legoAsset = !['existing', 'self-signed'].includes(config.certificate.mode) && certificateDomain ? coreAssetLines('lego', { channel: 'stable', core: 'lego' }, env) : null;
   const busyboxAsset = config.subscription.server.enabled ? coreAssetLines('busybox', { channel: 'stable', core: 'busybox' }, env) : null;
   const realityAutoIds = config.inbounds.filter(item => item.tls.mode === 'reality' && item.tls.autoGenerate).map(item => String(item.id).replace(/[^A-Za-z0-9_]/g, '_')).join(',');
+  const chainInbounds = config.inbounds.filter(item => item.outbound === 'chain' && item.chain?.snapshot);
+  const chainProtocols = [...new Set(chainInbounds.map(item => item.chain.snapshot.protocol).filter(Boolean))].join(',');
+  const chainSourceTypes = [...new Set(chainInbounds.map(item => item.chain?.source?.type).filter(Boolean))].join(',');
+  const chainTargets = chainInbounds.map(item => {
+    const snapshot = item.chain.snapshot;
+    const safe = value => String(value || '').replace(/[|\r\n]/g, ' ').slice(0, 253);
+    const diagnosticTag = `chain-${String(item.id || 'inbound').replace(/[^A-Za-z0-9_-]/g, '_')}`;
+    return [safe(item.id), safe(snapshot.protocol), safe(snapshot.server), Number(snapshot.port) || 0, safe(snapshot.transport?.type || 'tcp'), safe(diagnosticTag)].join('|');
+  }).join('\n');
   const udpHopRules = config.inbounds.filter(item => item.protocol === 'hysteria2' && item.transportOptions.udpHopPorts).map(item => `${item.port}:${item.transportOptions.udpHopPorts.replace(/,/g, '+')}`).join(' ');
   const inboundSummary = config.inbounds.map(item => {
     const network = ['hysteria2', 'tuic'].includes(item.protocol) || (item.transport === 'xhttp' && item.transportOptions.xhttpVersion === 'h3') ? 'UDP' : 'TCP';
@@ -958,6 +1303,7 @@ export function compileBootstrapConfig(config, callbackToken, callbackUrl, deplo
     `control_command=${config.runtime.controlCommand || 'tsub'}`,
     `${core}_version=${mainAsset.version}`,
     `inbound_count=${config.inbounds.length}`, `tunnel_count=${config.tunnels.length}`,
+    `chain_count=${chainInbounds.length}`, `chain_protocols=${chainProtocols}`, `chain_source_types=${chainSourceTypes}`, `chain_targets_b64=${base64Utf8(chainTargets)}`,
     `inbound_ports=${config.inbounds.map(item => `${item.port}/${['hysteria2', 'tuic'].includes(item.protocol) || (item.transport === 'xhttp' && item.transportOptions.xhttpVersion === 'h3') ? 'udp' : 'tcp'}`).join(',')}`,
     `udp_hop_rules=${udpHopRules}`,
     `firewall_enabled=${config.firewall.enabled}`, `warp_backend=${config.inbounds.some(item => item.outbound.startsWith('warp')) ? 'userspace' : 'none'}`,
@@ -1528,7 +1874,7 @@ export async function handleDeployEvents(request, env) {
   const cacheNodes = normalizeCallbackNodes(payload.cacheNodes);
   const timestamp = nowIso();
   const event = {
-    at: timestamp, status, stage: String(payload.stage || '').slice(0, 64), message: String(payload.message || '').slice(-500), errorCode: String(payload.errorCode || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64),
+    at: timestamp, status, stage: redactSensitiveText(String(payload.stage || '')).slice(0, 64), message: redactSensitiveText(String(payload.message || '')).slice(-500), errorCode: String(payload.errorCode || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64),
     resources: {
       tier: String(payload.resourceTier || ''), container: String(payload.container || ''), init: String(payload.init || ''),
       tun: payload.tun === 'true', firewall: payload.firewall === 'true', memoryMb: Number(payload.memoryMb || payload.cgroupLimitMb || 0),
@@ -2014,6 +2360,8 @@ export async function handleDeployAgentCommandEvents(request, env, commandId) {
 
 async function createOperation(request, storage, deployment, action, env, options = {}) {
   if (!ACTIONS.has(action)) return createErrorResponse('Unsupported deployment action', 400);
+  // Fail before issuing a token that bootstrap cannot use.
+  validateRuntimeAssets(await decryptDeploymentConfig(deployment.encryptedConfig, env), env);
   const bootstrapToken = randomToken(); const callbackToken = randomToken();
   const bootstrapTokenHash = await sha256(bootstrapToken); const callbackTokenHash = await sha256(callbackToken);
   const createdAt = nowIso();
@@ -2074,6 +2422,14 @@ async function listWithLegacyDrafts(storage) {
 }
 
 export async function handleDeploymentsRequest(request, env, path) {
+  try {
+    return await handleDeploymentsRequestInternal(request, env, path);
+  } catch (error) {
+    return deploymentErrorResponse(error);
+  }
+}
+
+async function handleDeploymentsRequestInternal(request, env, path) {
   const storage = await getStorage(env);
   const demoData = await readDemoData(storage).catch(() => null);
   const parts = path.split('/').filter(Boolean); const id = parts[1] || ''; const child = parts[2] || '';
@@ -2090,27 +2446,28 @@ export async function handleDeploymentsRequest(request, env, path) {
     let body; try { body = await readJsonWithLimit(request, JSON_BODY_LIMITS.deployment); } catch (error) { return createErrorResponse(error.message || 'Invalid JSON', error.status || 400); }
     const name = String(body?.name || '').trim().slice(0, 120);
     if (!name) return createErrorResponse('Deployment name is required', 400);
-    let config; let encryptedConfig; let defaults; let requestConfig = body.config || {};
+    let config; let encryptedConfig; let defaults; let requestConfig = stripServerChainMarkers(cloneJson(body.config || {}));
     try {
+      validateDeploymentSecret(env);
       const systemDefaults = await readDeploymentDefaults(storage, env);
       if (body.cloneFromDeploymentId) {
         const source = await findDeployment(storage, String(body.cloneFromDeploymentId));
-        if (!source || source.schemaVersion !== 2 || source.status === 'offline') return createErrorResponse('Clone source is unavailable', 409);
+        const selectiveClone = body.selectiveCloneOptions && typeof body.selectiveCloneOptions === 'object';
+        if (!source || source.schemaVersion !== 2 || (!selectiveClone && source.status === 'offline')) return createErrorResponse('Clone source is unavailable', 409);
         const sourceRevision = Number.isSafeInteger(source.configRevision) ? source.configRevision : 1;
         if (body.configRevision !== undefined && Number(body.configRevision) !== sourceRevision) return createErrorResponse('Deployment configuration changed; reload it before cloning', 409);
-        requestConfig = restoreDeploymentSecrets(
-          requestConfig,
-          await decryptDeploymentConfig(source.encryptedConfig, env),
-          false,
-          body.resetInheritedNodeNames === true
-        );
+        const sourceConfig = await decryptDeploymentConfig(source.encryptedConfig, env);
+        requestConfig = selectiveClone
+          ? restoreSelectiveCloneSecrets(requestConfig, sourceConfig, body.selectiveCloneOptions)
+          : restoreDeploymentSecrets(requestConfig, sourceConfig, false, body.resetInheritedNodeNames === true);
       }
+      requestConfig = await resolveChainSourcesInConfig(requestConfig, storage, env, '');
       defaults = mergeDeploymentDefaults(systemDefaults, requestConfig.defaults || {});
       config = resolveV2Config(requestConfig, systemDefaults, { deploymentName: name });
       await resolveCloudflareEdgeMetadata(config);
       validateRuntimeAssets(config, env); encryptedConfig = await encryptDeploymentConfig(config, env);
     }
-    catch (error) { return createErrorResponse(error.code || error.message, error.status || (/DEPLOYMENT_SECRET_KEY|资产|版本环境变量|PINNED_CORE_MANIFEST|Pinned 清单/.test(error.message) ? 503 : 400)); }
+    catch (error) { return deploymentErrorResponse(error, 400); }
     const timestamp = nowIso();
     const clonedDeployment = Boolean(body.cloneFromDeploymentId);
     const nodeGroup = clonedDeployment && body.nodeGroup !== undefined
@@ -2129,6 +2486,17 @@ export async function handleDeploymentsRequest(request, env, path) {
     if (body.createCommand === false) return createJsonResponse({ success: true, data: { deployment: publicDeployment(deployment) } }, 201);
     const response = await createOperation(request, storage, deployment, 'apply', env, { outputLanguage: body.outputLanguage }); const result = await response.json();
     return createJsonResponse({ success: true, data: { deployment: publicDeployment(deployment), ...result.data } }, 201);
+  }
+  if (id === 'chain-sources' && !child && request.method === 'GET') {
+    try { return createJsonResponse({ success: true, data: await listChainSources(storage, env, request) }, 200, { 'Cache-Control': 'no-store' }); }
+    catch (error) { return createErrorResponse(error.message || 'Unable to list chain sources', error.status || 400); }
+  }
+  if (id === 'chain-sources' && child === 'preview' && request.method === 'POST') {
+    let body; try { body = await readJsonWithLimit(request, JSON_BODY_LIMITS.small); } catch (error) { return createErrorResponse(error.message || 'Invalid JSON', error.status || 400); }
+    try {
+      const normalized = normalizeChainNodeUrl(body?.url, { type: 'url', label: body?.label || '', routeType: 'direct' });
+      return createJsonResponse({ success: true, data: chainSourceItem(normalized, normalized.source) }, 200, { 'Cache-Control': 'no-store' });
+    } catch (error) { return createErrorResponse(error.message || 'Unable to parse node URL', 400); }
   }
   const demoDeployment = id ? (demoData?.deployments || []).find(item => item.id === id) : null;
   const deployment = demoDeployment || (id ? await findDeployment(storage, id) : null);
@@ -2160,7 +2528,7 @@ export async function handleDeploymentsRequest(request, env, path) {
           retainedSecrets: true
         }
       });
-    } catch { return createErrorResponse('Service unavailable', 503); }
+    } catch (error) { return deploymentErrorResponse(error); }
   }
   if (!child && request.method === 'PATCH') {
     let body; try { body = await readJsonWithLimit(request, JSON_BODY_LIMITS.deployment); } catch (error) { return createErrorResponse(error.message || 'Invalid JSON', error.status || 400); }
@@ -2171,7 +2539,8 @@ export async function handleDeploymentsRequest(request, env, path) {
       try {
         const sourceConfig = await decryptDeploymentConfig(deployment.encryptedConfig, env);
         const systemDefaults = await readDeploymentDefaults(storage, env);
-        const restoredConfig = restoreDeploymentSecrets(body.config, sourceConfig, true);
+        let restoredConfig = restoreDeploymentSecrets(stripServerChainMarkers(cloneJson(body.config)), sourceConfig, true);
+        restoredConfig = await resolveChainSourcesInConfig(restoredConfig, storage, env, deployment.id);
         const configDefaults = mergeDeploymentDefaults(systemDefaults, restoredConfig.defaults || {});
         const config = resolveV2Config(restoredConfig, systemDefaults, { deploymentName: deployment.name });
         await resolveCloudflareEdgeMetadata(config);
@@ -2181,7 +2550,7 @@ export async function handleDeploymentsRequest(request, env, path) {
         deployment.status = 'pending';
         deployment.pendingReason = 'config';
       }
-      catch (error) { return createErrorResponse(error.code || error.message, error.status || (/资产|版本环境变量|PINNED_CORE_MANIFEST|Pinned 清单/.test(error.message) ? 503 : 400)); }
+      catch (error) { return deploymentErrorResponse(error, 400); }
     }
     deployment.updatedAt = nowIso(); await writeDeployment(storage, deployment);
     return createJsonResponse({ success: true, data: publicDeployment(deployment) });
@@ -2298,10 +2667,11 @@ export async function handleDeploymentsRequest(request, env, path) {
         Object.assign(deployment, nextDeployment);
         await writeDeployment(storage, deployment);
       } catch (error) {
-        return createErrorResponse(error.message, error.status || (/DEPLOYMENT_SECRET_KEY|资产|版本环境变量|PINNED_CORE_MANIFEST|Pinned 清单/.test(error.message) ? 503 : 400));
+        return deploymentErrorResponse(error, 400);
       }
     } else if (action === 'reinstall') {
       if (!isDeploymentReinstallable(deployment)) return createErrorResponse('Deployment cannot be reinstalled in its current state', 409);
+      validateRuntimeAssets(await decryptDeploymentConfig(deployment.encryptedConfig, env), env);
       await supersedeDeploymentOperations(storage, deployment.id);
       deployment.status = 'pending';
       deployment.pendingReason = 'reinstall';
@@ -2419,7 +2789,7 @@ export async function handleDeploymentsRequest(request, env, path) {
         await writeOperation(storage, operation);
         const command = await queueAgentCommand(storage, deployment, operation, commandData);
         return createJsonResponse({ success: true, data: { operation: publicOperation(operation), command } }, 202);
-      } catch (error) { return createJsonResponse({ success: false, error: error.code || 'remote_command_failed', message: error.message }, error.status || 400); }
+      } catch (error) { return deploymentErrorResponse(error, 400); }
     }
     return createOperation(request, storage, deployment, String(body.action || ''), env, { outputLanguage: body.outputLanguage });
   }

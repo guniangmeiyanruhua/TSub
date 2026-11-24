@@ -329,6 +329,24 @@ export const messages = {
       submit: { install: '生成安装命令', update: '保存配置并生成更新命令', reinstall: '保存配置并生成重新安装命令', remoteUpdate: '保存并远程应用', uninstall: '生成卸载命令' },
       targetDeployment: '已部署记录', updateSelectHint: '选择已有部署并确认载入后，才会显示可编辑配置。',
       reuseNotice: '当前配置复用自已有部署。提交后将创建一条全新部署记录，不会覆盖来源部署。', noProtocolSummary: '暂无协议摘要',
+      source: {
+        title: '配置来源', hint: '可手动配置，也可从主控保存的部署记录复用公共配置。来源不是服务器实时状态。', manual: '手动配置', reuse: '从已有部署复用', select: '选择已有部署', loading: '正在读取脱敏配置…',
+        summary: '配置版本 {version} · 入站 {count} 个 · 协议：{protocols} · 出站：{outbounds} · 核心：{core}', lastUpdated: '最后更新：{time}',
+        reuseInbounds: '复用入站协议和传输', reuseTls: '复用 TLS/Reality 公共参数', reuseOutbound: '复用出站策略', reusePorts: '复用端口', reuseCredentials: '复用凭据和私钥', reuseWarp: '复用 WARP 身份', reuseSubscription: '复用订阅服务', reuseChainUpstream: '复用链式上游', reuseNodeName: '复用节点名称', selectInbounds: '选择需要复用的入站协议', selectInboundRequired: '请至少选择一个入站协议。',
+        sensitiveHint: '端口、UUID、密码、Reality/WARP 私钥和订阅 Token 默认重新生成；已载入的配置只来自主控保存记录。', apply: '载入并应用配置', applied: '已载入非敏感部署配置'
+      },
+      chain: {
+        title: '链式代理', sourceType: '来源类型',
+        sources: { deployment: '部署节点', subscription: '订阅节点', manual: '手动节点', url: '粘贴节点链接' },
+        routes: { direct: '直连节点', cdn: 'CDN 节点', tunnel: 'Tunnel 节点' },
+        selectDeployment: '选择部署', selectSubscription: '选择订阅源', deploymentRequired: '请先选择部署', subscriptionRequired: '请先选择订阅源',
+        search: '搜索名称、地址或协议', allProtocols: '全部协议', empty: '该来源没有可用节点。', loadingSources: '正在加载来源', loadingNodes: '正在加载节点', noSources: '没有可用来源', noSubscriptionSources: '没有可用缓存订阅，请先在订阅管理中开启保护性缓存并刷新订阅。', subscriptionEmpty: '该订阅没有可用缓存节点，请先刷新订阅', loadSourcesFailed: '加载来源失败，请重试', loadNodesFailed: '加载节点失败，请重试', loadMore: '加载更多节点', loadMoreSources: '加载更多来源',
+        preview: '解析预览', urlPlaceholder: '粘贴 vless://、vmess://、trojan://、ss:// 等节点链接',
+        snapshotHint: '上游配置将作为加密快照保存；来源变化后需要重新选择并执行“更新配置”。',
+        failClosedHint: '上游不可用时连接会失败，不会回退服务器直连。', savedRecordHint: '来源来自主控保存记录，不代表服务器上的手工修改。',
+        sourceRequired: '请选择或解析一个链式上游节点。', sourceMissing: '原链式来源已不存在；当前加密快照仍保留，请重新选择后再更新配置。', urlRequired: '请粘贴节点链接。', previewFailed: '节点链接解析失败。', loadFailed: '链式上游来源读取失败。',
+        naiveInboundUnsupported: 'Naive 入站不能配置链式代理出口。', coreUnsupported: '{core} 核心不支持 {protocol} 链式上游。'
+      },
       globalConfig: '协议全局配置', globalScope: '应用于：{protocols}', moreSettings: '更多设置', generate: '生成', generateUuid: '生成 UUID', generateSecret: '生成安全值',
       saveSystemDefault: '保存为系统默认', generateDeploymentCommand: '生成部署命令',
       oneTimeCommand: '一次性部署命令', commandPlaceholder: '仅可领取一次，请复制到目标服务器的 Shell 中执行', showTroubleshootingCommand: '显示排障命令', hideTroubleshootingCommand: '隐藏排障命令', bootstrapExpires: 'Bootstrap 令牌过期：{time}',
@@ -339,7 +357,7 @@ export const messages = {
       record: {
         deployedDate: '部署时间 {date}', updatedDate: '更新时间 {date}', timeDetails: '部署与更新时间', deployed: '部署时间', updated: '更新时间',
         deployedFull: '部署时间 {time}', updatedFull: '更新时间 {time}', systemUnknown: '系统未知', runtimeCompact: 'Runtime {version}', systemDetails: '服务器详情',
-        nodeAddress: '节点地址', addressMode: '地址模式', edgeEntry: '边缘入口', system: '系统', runtime: 'Runtime', core: '核心', containerInit: '容器 / init', memory: '内存', memoryRss: 'RSS {value} MB', memoryAvailable: '可用 {value} MB', memoryLimit: 'cgroup 上限 {value} MB', memorySwap: 'Swap {used}/{total} MB（可用 {free} MB）', memorySwapDisabled: 'Swap 未配置', memoryCgroupSwap: 'cgroup Swap {used}/{limit} MB', memoryCgroupSwapUnlimited: 'cgroup Swap 已用 {used} MB（无限制）', protocols: '协议端口', tls: 'TLS', subscription: '订阅端口', trafficBackend: '流量统计后端', command: '服务器命令', tuicCertificatePinMissing: '自签 TUIC 缺少有效证书指纹。主控仍会下发该节点，但客户端可能提示不安全或连接失败，请执行“更新配置”后恢复。',
+        nodeAddress: '节点地址', addressMode: '地址模式', edgeEntry: '边缘入口', system: '系统', runtime: 'Runtime', core: '核心', containerInit: '容器 / init', memory: '内存', memoryRss: 'RSS {value} MB', memoryAvailable: '可用 {value} MB', memoryLimit: 'cgroup 上限 {value} MB', memorySwap: 'Swap {used}/{total} MB（可用 {free} MB）', memorySwapDisabled: 'Swap 未配置', memoryCgroupSwap: 'cgroup Swap {used}/{limit} MB', memoryCgroupSwapUnlimited: 'cgroup Swap 已用 {used} MB（无限制）', protocols: '协议端口', chainUpstreams: '链式上游', chainCount: '{count} 个链式入站', tls: 'TLS', subscription: '订阅端口', trafficBackend: '流量统计后端', command: '服务器命令', tuicCertificatePinMissing: '自签 TUIC 缺少有效证书指纹。主控仍会下发该节点，但客户端可能提示不安全或连接失败，请执行“更新配置”后恢复。',
         heartbeatDetails: 'Agent 心跳详情', heartbeatRequiresD1: '切换到 D1 后可用', heartbeatMissing: '尚未收到心跳', agentOnline: 'Agent 在线', agentOffline: 'Agent 离线', heartbeatAt: '心跳 {time}',
         lastHeartbeat: '最后心跳', pollInterval: '连接频率', hostname: '主机名', configRevision: '配置版本', currentCommand: '当前命令', noCurrentCommand: '无'
       },
@@ -420,7 +438,7 @@ export const messages = {
         endpoints: 'CDN 节点连接这些优选 IP 或域名，但 Host 和 SNI 始终使用 Cloudflare 入口域名。',
         warp: '为选择 WARP 出站的入站提供服务器出口；自动模式在服务器注册独立免费 WARP 身份。',
         inboundTransport: 'VLESS、VMess 和 Trojan 可选择通用传输；其他协议固定使用自身原生传输。传输方式会影响 TLS、CDN 和核心兼容性。',
-        inboundOutbound: '仅控制当前入站访问目标网站时的出口；可使用服务器直连或指定 WARP 地址族。',
+        inboundOutbound: '仅控制当前入站访问目标网站时的出口；可使用服务器直连、指定 WARP 地址族或单级链式上游。',
         inboundEdgeMode: '控制当前入站生成直连节点、直连加 CDN 节点或仅 CDN 节点。',
         inboundTls: '留空时继承协议全局配置或协议默认值；可用选项会随协议和传输方式变化。',
         inboundServerName: '用于 TLS SNI、Reality 目标或 HTTP Host；留空时继承全局值或协议内置值。'
@@ -428,14 +446,14 @@ export const messages = {
       resources: { pending: '等待服务器上报' },
       inbounds: {
         title: '入站协议', hint: '端口和节点名称可留空自动生成，同一协议可重复添加，最多 20 个。', protocol: '协议', port: '端口', nodeName: '节点名称', transport: '传输', outbound: '出站',
-        advanced: '更多', delete: '删除入站', inherit: '继承（{value}）', inheritGlobal: '继承全局', unsupportedByCore: '（{core} 不支持）',
+        advanced: '更多', delete: '删除入站', inherit: '继承（{value}）', inheritGlobal: '继承全局', unsupportedByCore: '（{core} 不支持）', unsupportedOutbound: '（当前协议不支持）',
         serverName: '服务器名称', host: '传输 Host（可选）', uuidOverride: 'UUID 覆盖', passwordOverride: '密码覆盖', tuicPasswordOverride: 'TUIC 密码覆盖', path: '路径',
         realityPrivateKey: 'Reality 私钥', realityPublicKey: 'Reality 公钥', serviceName: '服务名称', xhttpMode: 'XHTTP 模式', xhttpVersion: 'HTTP 版本', edgeMode: 'CDN 节点',
         bandwidthUp: '上传带宽', bandwidthDown: '下载带宽', udpHopPorts: 'UDP 跳跃端口', udpHopInterval: '跳跃周期（秒）'
       },
       options: {
         selfSigned: '自动自签（默认）', existingCertificate: '已有证书', autoCore: '自动（优先 Xray）', notLinked: '不关联',
-        protocolDefault: '协议默认', noTls: '无 TLS', stable: '稳定清单', latest: '最新版本', pinned: '指定版本', autoDetect: '自动探测', direct: '直连', warpAuto: 'WARP 自动', quickTunnel: '临时隧道', namedTunnel: '固定隧道', firewallAuto: '自动管理（推荐）', firewallOff: '不管理',
+        protocolDefault: '协议默认', noTls: '无 TLS', stable: '稳定清单', latest: '最新版本', pinned: '指定版本', autoDetect: '自动探测', direct: '直连', warpAuto: 'WARP 自动', chain: '链式代理', quickTunnel: '临时隧道', namedTunnel: '固定隧道', firewallAuto: '自动管理（推荐）', firewallOff: '不管理',
         nodeNameDeployment: '部署名称-协议-端口（默认）', nodeNamePrefix: '节点前缀-协议-端口', nodeNameRandom: '协议-随机后缀', addressAuto: '自动（优先 IPv4）', seconds: '{seconds} 秒'
       },
       actions: { plan: '更新配置', reinstall: '重新安装', apply: '复用配置', status: '获取状态', list: '同步节点', update: '更新核心', updateRuntime: '更新版本', 'update-runtime': '更新版本', rollbackRuntime: '回退 Runtime', 'rollback-runtime': '回退 Runtime', restart: '重启', repair: '修复', doctor: '诊断', rollback: '回滚', uninstall: '卸载', 'edge-probe': 'CDN 真实握手检测' },
@@ -444,9 +462,29 @@ export const messages = {
       table: { action: '动作', stage: '阶段', host: '主机', resources: '资源', startedAt: '开始时间', completedAt: '完成时间', notRecorded: '未记录', result: '结果' },
       notices: {
         defaultsSaved: '系统默认配置已加密保存', defaultsReset: '系统默认配置已重置',
-        commandGenerated: '安装命令已生成，随机端口已写入部署摘要', updateCommandGenerated: '配置已保存，更新命令已生成', reinstallCommandGenerated: '配置已保存，重新安装命令已生成', configLoaded: '已载入原部署配置', configReconfigured: '已使用当前表单重新配置所选部署', configReused: '已复用原部署配置，将创建新部署', operationCommandGenerated: '运维命令已生成', recordDeleted: '部署记录已删除', sourceRestored: '订阅来源已恢复，等待下一次主动推送更新节点', commandCopied: '命令已复制', realityKeysGenerated: 'Reality 密钥对已生成', cloudflareResourcesCleaned: 'Cloudflare Tunnel 和 DNS 资源已清理'
+        commandGenerated: '安装命令已生成，随机端口已写入部署摘要', updateCommandGenerated: '配置已保存，更新命令已生成', reinstallCommandGenerated: '配置已保存，重新安装命令已生成', configLoaded: '已载入原部署配置', configReconfigured: '已使用当前表单重新配置所选部署', configReused: '已复用原部署配置，将创建新部署', reuseApplied: '已载入非敏感部署配置，敏感凭据将重新生成', operationCommandGenerated: '运维命令已生成', recordDeleted: '部署记录已删除', sourceRestored: '订阅来源已恢复，等待下一次主动推送更新节点', commandCopied: '命令已复制', realityKeysGenerated: 'Reality 密钥对已生成', cloudflareResourcesCleaned: 'Cloudflare Tunnel 和 DNS 资源已清理'
       },
       confirm: { resetDefaults: '确认删除已保存的部署默认配置并恢复内置默认值？', operationTitle: '确认生成运维命令', operation: '确认生成“{name}”的“{action}”命令？', generateOperation: '生成{action}命令', uninstall: '确认生成“{name}”的卸载命令？节点将被禁用。', deleteRecord: '删除部署记录“{name}”？', deleteSubscriptionSource: '是否同时删除该部署创建的主动推送订阅？\n\n选择“确定”将删除订阅及其组合订阅引用；选择“取消”仅删除部署记录并保留订阅。', preserveCloudflareResources: '该部署仍关联 Cloudflare Tunnel。确定删除记录并保留 Cloudflare 资源吗？取消后可先点击“清理 Cloudflare 资源”。', cleanupCloudflareResources: '请输入部署名称“{name}”确认删除专用 Tunnel 和 DNS 记录：' },
+      commandErrors: {
+        DEPLOYMENT_KEY_MISSING: "未配置 DEPLOYMENT_SECRET_KEY。请在 Cloudflare Pages 当前环境添加至少 16 位的独立随机 Secret，然后重新部署。已有部署请恢复原密钥，不要随意更换。",
+        DEPLOYMENT_KEY_INVALID: "DEPLOYMENT_SECRET_KEY 不符合要求。请使用至少 16 位的非空白密钥并重新部署；已有加密配置必须使用原密钥。",
+        DEPLOYMENT_DECRYPT_FAILED: "无法解密已保存的部署配置。请恢复保存配置时使用的 DEPLOYMENT_SECRET_KEY，不要删除原部署或随机更换密钥。",
+        DEPLOYMENT_ASSET_OVERRIDE_INCOMPLETE: "核心资产覆盖变量不完整。请删除对应核心的整组覆盖变量以使用内置资产，或补齐版本、AMD64/ARM64 下载地址和 SHA-256 后重新部署。",
+        DEPLOYMENT_ASSET_INVALID: "核心资产地址、格式或 SHA-256 无效。请检查 HTTPS 地址、64 位 SHA-256 和解压后二进制校验值，或删除整组覆盖变量后重新部署。",
+        DEPLOYMENT_PINNED_MANIFEST_INVALID: "固定版本清单不是有效 JSON。请修正 TSUB_PINNED_CORE_MANIFEST，或切换到 stable 通道。",
+        DEPLOYMENT_PINNED_ASSET_MISSING: "固定版本清单中没有所选核心版本。请补齐 TSUB_PINNED_CORE_MANIFEST，或切换到 stable 通道。",
+        DEPLOYMENT_STORAGE_UNAVAILABLE: "部署存储不可用。请检查当前环境的 TSUB_DB/TSUB_KV 绑定、存储模式和数据库初始化状态，然后重新部署。",
+        DEPLOYMENT_COMMAND_FAILED: "部署请求未完成。请先刷新部署记录和操作记录，确认是否已保存，再重试，避免重复创建。请保留请求编号用于排查。",
+        REVISION_CONFLICT: "原部署配置已被修改，请重新载入后再提交。",
+        auth: "登录已过期或没有操作权限，请重新登录后重试。",
+        network: "网络连接失败。请检查到主控的连接，刷新部署记录确认是否已保存后再重试。",
+        timeout: "请求超时。请先刷新部署记录确认是否已保存，避免重复创建。",
+        unavailable: "主控暂不可用。旧版接口可能隐藏具体原因，请检查 DEPLOYMENT_SECRET_KEY、核心资产覆盖变量和存储绑定，并保留请求编号。",
+        tooLarge: "部署配置超过请求大小限制，请减少入站或配置内容后重试。",
+        rateLimited: "请求过于频繁，请稍后重试。",
+        invalidResponse: "主控未返回有效命令。请检查网络或网关，并刷新部署记录确认是否已保存后再重试。",
+        requestId: "请求编号",
+      },
       errors: {
         maxInbounds: '每个部署最多添加 20 个入站', loadDefaults: '读取系统默认配置失败', saveDefaults: '保存系统默认配置失败', resetDefaults: '重置系统默认配置失败',
         nameRequired: '请填写部署名称', controlCommandInvalid: '服务器控制命令必须以小写字母开头，且只能包含小写字母、数字、连字符和下划线（最多 32 位）', sharedUuidInvalid: '统一 UUID 无效', randomPortRange: '随机端口范围必须在 1-65535 内并至少容纳 20 个端口',
@@ -601,7 +639,7 @@ export const messages = {
       notesLabel: '备注',
       notesPlaceholder: '例如: 价格: ¥20/月 | 到期: 2024-12-31',
       nodeCacheTitle: '保护性缓存节点',
-      nodeCacheDesc: '拉取失败或空节点时使用上次缓存，避免节点清零',
+      nodeCacheDesc: '拉取失败或空节点时使用上次缓存，避免节点清零；开启后刷新订阅即可用于链式代理。',
       plusAsSpaceTitle: '+ 号转空格',
       plusAsSpaceDesc: '将节点名中的 + 号显示为空格',
       excludeTrafficTitle: '合并时不计算此机场流量',
@@ -1888,6 +1926,24 @@ export const messages = {
       submit: { install: 'Generate Install Command', update: 'Save Configuration and Generate Update Command', reinstall: 'Save Configuration and Generate Reinstall Command', remoteUpdate: 'Save and Apply Remotely', uninstall: 'Generate Uninstall Command' },
       targetDeployment: 'Existing Deployment', updateSelectHint: 'Select a deployment and confirm loading it before editing its configuration.',
       reuseNotice: 'This configuration is reused from an existing deployment. Submitting creates a new deployment without changing the source.', noProtocolSummary: 'No protocol summary',
+      source: {
+        title: 'Configuration Source', hint: 'Configure manually or reuse public settings from a controller-saved deployment. This is not live server state.', manual: 'Manual Configuration', reuse: 'Reuse Existing Deployment', select: 'Select Existing Deployment', loading: 'Loading masked configuration…',
+        summary: 'Config v{version} · {count} inbounds · Protocols: {protocols} · Outbound: {outbounds} · Core: {core}', lastUpdated: 'Last updated: {time}',
+        reuseInbounds: 'Reuse inbound protocols and transport', reuseTls: 'Reuse public TLS/REALITY settings', reuseOutbound: 'Reuse outbound policy', reusePorts: 'Reuse ports', reuseCredentials: 'Reuse credentials and keys', reuseWarp: 'Reuse WARP identity', reuseSubscription: 'Reuse subscription service', reuseChainUpstream: 'Reuse chain upstream', reuseNodeName: 'Reuse node names', selectInbounds: 'Select inbound protocols to reuse', selectInboundRequired: 'Select at least one inbound protocol.',
+        sensitiveHint: 'Ports, UUIDs, passwords, Reality/WARP private keys, and subscription tokens are regenerated by default. Only the controller-saved template is loaded.', apply: 'Load and Apply Configuration', applied: 'Non-sensitive deployment configuration loaded'
+      },
+      chain: {
+        title: 'Chain Proxy', sourceType: 'Source Type',
+        sources: { deployment: 'Deployment Nodes', subscription: 'Subscription Nodes', manual: 'Manual Nodes', url: 'Paste Node URL' },
+        routes: { direct: 'Direct Node', cdn: 'CDN Node', tunnel: 'Tunnel Node' },
+        selectDeployment: 'Select Deployment', selectSubscription: 'Select Subscription', deploymentRequired: 'Select a deployment first', subscriptionRequired: 'Select a subscription first',
+        search: 'Search name, address, or protocol', allProtocols: 'All protocols', empty: 'This source has no eligible nodes.', loadingSources: 'Loading sources', loadingNodes: 'Loading nodes', noSources: 'No sources available', noSubscriptionSources: 'No cached subscriptions are available. Enable protected node caching in Subscriptions and refresh the subscription first.', subscriptionEmpty: 'This subscription has no cached nodes. Refresh the subscription first.', loadSourcesFailed: 'Failed to load sources. Try again.', loadNodesFailed: 'Failed to load nodes. Try again.', loadMore: 'Load More Nodes', loadMoreSources: 'Load More Sources',
+        preview: 'Parse Preview', urlPlaceholder: 'Paste a vless://, vmess://, trojan://, ss://, or other node URL',
+        snapshotHint: 'The upstream is stored as an encrypted snapshot. Reselect it and run Update Configuration after the source changes.',
+        failClosedHint: 'If the upstream fails, the connection fails closed and never falls back to direct egress.', savedRecordHint: 'The source comes from the controller saved record, not manual server-side changes.',
+        sourceRequired: 'Select or parse a chain upstream node.', sourceMissing: 'The original chain source no longer exists. The encrypted snapshot is retained; reselect a source before updating.', urlRequired: 'Paste a node URL.', previewFailed: 'Could not parse the node URL.', loadFailed: 'Could not load chain upstream sources.',
+        naiveInboundUnsupported: 'A Naive inbound cannot use a chain proxy outbound.', coreUnsupported: 'The {core} core does not support a {protocol} chain upstream.'
+      },
       globalConfig: 'Protocol Global Configuration', globalScope: 'Applies to: {protocols}', moreSettings: 'More Settings', generate: 'Generate', generateUuid: 'Generate UUID', generateSecret: 'Generate a secure value',
       saveSystemDefault: 'Save as System Default', generateDeploymentCommand: 'Generate Deployment Command',
       oneTimeCommand: 'One-time Deployment Command', commandPlaceholder: 'May be claimed once only. Copy and run it in the target server shell', showTroubleshootingCommand: 'Show troubleshooting command', hideTroubleshootingCommand: 'Hide troubleshooting command', bootstrapExpires: 'Bootstrap token expires: {time}',
@@ -1898,7 +1954,7 @@ export const messages = {
       record: {
         deployedDate: 'Deployed {date}', updatedDate: 'Updated {date}', timeDetails: 'Deployment and update times', deployed: 'Deployed', updated: 'Updated',
         deployedFull: 'Deployed {time}', updatedFull: 'Updated {time}', systemUnknown: 'System unknown', runtimeCompact: 'Runtime {version}', systemDetails: 'Server details',
-        nodeAddress: 'Node address', addressMode: 'Address mode', edgeEntry: 'Edge entry', system: 'System', runtime: 'Runtime', core: 'Core', containerInit: 'Container / init', memory: 'Memory', memoryRss: 'RSS {value} MB', memoryAvailable: '{value} MB available', memoryLimit: 'cgroup limit {value} MB', memorySwap: 'Swap {used}/{total} MB ({free} MB free)', memorySwapDisabled: 'Swap not configured', memoryCgroupSwap: 'cgroup Swap {used}/{limit} MB', memoryCgroupSwapUnlimited: 'cgroup Swap {used} MB used (unlimited)', protocols: 'Protocol ports', tls: 'TLS', subscription: 'Subscription port', trafficBackend: 'Traffic backend', command: 'Server command', tuicCertificatePinMissing: 'The self-signed TUIC certificate pin is missing. The controller still serves this node, but clients may report an insecure configuration or fail to connect. Run Update Configuration to restore it.',
+        nodeAddress: 'Node address', addressMode: 'Address mode', edgeEntry: 'Edge entry', system: 'System', runtime: 'Runtime', core: 'Core', containerInit: 'Container / init', memory: 'Memory', memoryRss: 'RSS {value} MB', memoryAvailable: '{value} MB available', memoryLimit: 'cgroup limit {value} MB', memorySwap: 'Swap {used}/{total} MB ({free} MB free)', memorySwapDisabled: 'Swap not configured', memoryCgroupSwap: 'cgroup Swap {used}/{limit} MB', memoryCgroupSwapUnlimited: 'cgroup Swap {used} MB used (unlimited)', protocols: 'Protocol ports', chainUpstreams: 'Chain upstreams', chainCount: '{count} chained inbound(s)', tls: 'TLS', subscription: 'Subscription port', trafficBackend: 'Traffic backend', command: 'Server command', tuicCertificatePinMissing: 'The self-signed TUIC certificate pin is missing. The controller still serves this node, but clients may report an insecure configuration or fail to connect. Run Update Configuration to restore it.',
         heartbeatDetails: 'Agent heartbeat details', heartbeatRequiresD1: 'Available after switching to D1', heartbeatMissing: 'No heartbeat received', agentOnline: 'Agent online', agentOffline: 'Agent offline', heartbeatAt: 'Heartbeat {time}',
         lastHeartbeat: 'Last heartbeat', pollInterval: 'Connection interval', hostname: 'Hostname', configRevision: 'Configuration revision', currentCommand: 'Current command', noCurrentCommand: 'None'
       },
@@ -1979,7 +2035,7 @@ export const messages = {
         endpoints: 'CDN nodes connect to these preferred IPs or hostnames while Host and SNI always use the Cloudflare entry hostname.',
         warp: 'Provides server egress for inbounds assigned to WARP. Auto mode registers a separate free WARP identity on the server.',
         inboundTransport: 'VLESS, VMess, and Trojan support selectable transports. Other protocols use a fixed native transport. Transport affects TLS, CDN, and core compatibility.',
-        inboundOutbound: 'Controls only how this inbound reaches destination sites: directly or through the selected WARP address family.',
+        inboundOutbound: 'Controls how this inbound reaches destination sites: direct, a selected WARP address family, or one chain upstream.',
         inboundEdgeMode: 'Controls whether this inbound produces direct nodes, direct plus CDN nodes, or CDN-only nodes.',
         inboundTls: 'When empty, inherits the global or protocol default. Available modes vary by protocol and transport.',
         inboundServerName: 'Used for TLS SNI, the Reality target, or HTTP Host. When empty, inherits the global or protocol built-in value.'
@@ -1987,14 +2043,14 @@ export const messages = {
       resources: { pending: 'Waiting for server report' },
       inbounds: {
         title: 'Inbound Protocols', hint: 'Empty ports and node names are generated automatically. Protocols may be repeated, up to 20 inbounds.', protocol: 'Protocol', port: 'Port', nodeName: 'Node Name', transport: 'Transport', outbound: 'Outbound',
-        advanced: 'More', delete: 'Delete inbound', inherit: 'Inherit ({value})', inheritGlobal: 'Inherit global value', unsupportedByCore: ' ({core} unsupported)',
+        advanced: 'More', delete: 'Delete inbound', inherit: 'Inherit ({value})', inheritGlobal: 'Inherit global value', unsupportedByCore: ' ({core} unsupported)', unsupportedOutbound: ' (unsupported by this protocol)',
         serverName: 'Server Name', host: 'Transport Host (optional)', uuidOverride: 'UUID Override', passwordOverride: 'Password Override', tuicPasswordOverride: 'TUIC Password Override', path: 'Path',
         realityPrivateKey: 'Reality Private Key', realityPublicKey: 'Reality Public Key', serviceName: 'Service Name', xhttpMode: 'XHTTP Mode', xhttpVersion: 'HTTP Version', edgeMode: 'CDN nodes',
         bandwidthUp: 'Upload Bandwidth', bandwidthDown: 'Download Bandwidth', udpHopPorts: 'UDP Hop Ports', udpHopInterval: 'Hop Interval (seconds)'
       },
       options: {
         selfSigned: 'Automatic self-signed (default)', existingCertificate: 'Existing certificate', autoCore: 'Auto (prefer Xray)', notLinked: 'Not linked',
-        protocolDefault: 'Protocol default', noTls: 'No TLS', stable: 'Stable manifest', latest: 'Latest', pinned: 'Pinned version', autoDetect: 'Auto detect', direct: 'Direct', warpAuto: 'WARP Auto', quickTunnel: 'Quick Tunnel', namedTunnel: 'Named Tunnel', firewallAuto: 'Automatic (recommended)', firewallOff: 'Do not manage',
+        protocolDefault: 'Protocol default', noTls: 'No TLS', stable: 'Stable manifest', latest: 'Latest', pinned: 'Pinned version', autoDetect: 'Auto detect', direct: 'Direct', warpAuto: 'WARP Auto', chain: 'Chain Proxy', quickTunnel: 'Quick Tunnel', namedTunnel: 'Named Tunnel', firewallAuto: 'Automatic (recommended)', firewallOff: 'Do not manage',
         nodeNameDeployment: 'Deployment-Protocol-Port (default)', nodeNamePrefix: 'Prefix-Protocol-Port', nodeNameRandom: 'Protocol-Random Suffix', addressAuto: 'Auto (prefer IPv4)', seconds: '{seconds} seconds'
       },
       actions: { plan: 'Update Configuration', reinstall: 'Reinstall', apply: 'Reuse Configuration', status: 'Status', list: 'Sync Nodes', update: 'Update Core', updateRuntime: 'Update Version', 'update-runtime': 'Update Version', rollbackRuntime: 'Roll Back Runtime', 'rollback-runtime': 'Roll Back Runtime', restart: 'Restart', repair: 'Repair', doctor: 'Doctor', rollback: 'Rollback', uninstall: 'Uninstall', 'edge-probe': 'CDN Real Handshake Test' },
@@ -2003,9 +2059,29 @@ export const messages = {
       table: { action: 'Action', stage: 'Stage', host: 'Host', resources: 'Resources', startedAt: 'Started', completedAt: 'Completed', notRecorded: 'Not recorded', result: 'Result' },
       notices: {
         defaultsSaved: 'System defaults saved with encryption', defaultsReset: 'System defaults reset',
-        commandGenerated: 'Install command generated; randomized ports are in the summary', updateCommandGenerated: 'Configuration saved and update command generated', reinstallCommandGenerated: 'Configuration saved and reinstall command generated', configLoaded: 'Existing deployment configuration loaded', configReconfigured: 'The selected deployment will be reconfigured with the current form', configReused: 'Configuration reused; a new deployment will be created', operationCommandGenerated: 'Operation command generated', recordDeleted: 'Deployment record deleted', sourceRestored: 'Subscription source restored; waiting for the next active push', commandCopied: 'Command copied', realityKeysGenerated: 'Reality key pair generated', cloudflareResourcesCleaned: 'Cloudflare Tunnel and DNS resources were removed'
+        commandGenerated: 'Install command generated; randomized ports are in the summary', updateCommandGenerated: 'Configuration saved and update command generated', reinstallCommandGenerated: 'Configuration saved and reinstall command generated', configLoaded: 'Existing deployment configuration loaded', configReconfigured: 'The selected deployment will be reconfigured with the current form', configReused: 'Configuration reused; a new deployment will be created', reuseApplied: 'Non-sensitive deployment configuration loaded; sensitive credentials will be regenerated', operationCommandGenerated: 'Operation command generated', recordDeleted: 'Deployment record deleted', sourceRestored: 'Subscription source restored; waiting for the next active push', commandCopied: 'Command copied', realityKeysGenerated: 'Reality key pair generated', cloudflareResourcesCleaned: 'Cloudflare Tunnel and DNS resources were removed'
       },
       confirm: { resetDefaults: 'Delete the saved deployment defaults and restore built-in defaults?', operationTitle: 'Confirm Operation Command', operation: 'Generate the {action} command for "{name}"?', generateOperation: 'Generate {action} Command', uninstall: 'Generate an uninstall command for "{name}"? Its nodes will be disabled.', deleteRecord: 'Delete deployment record "{name}"?', deleteSubscriptionSource: 'Also delete the active-push subscription created by this deployment?\n\nChoose OK to remove the subscription and its profile references, or Cancel to keep the subscription and delete only the deployment record.', preserveCloudflareResources: 'This deployment still owns a Cloudflare Tunnel. Delete the record and keep those resources? Cancel to clean them first.', cleanupCloudflareResources: 'Enter deployment name "{name}" to delete its dedicated Tunnel and DNS record:' },
+      commandErrors: {
+        DEPLOYMENT_KEY_MISSING: "DEPLOYMENT_SECRET_KEY is missing. Add an independent random Secret of at least 16 characters to the current Cloudflare Pages environment, then redeploy. Restore the original key for existing deployments; do not replace it arbitrarily.",
+        DEPLOYMENT_KEY_INVALID: "DEPLOYMENT_SECRET_KEY is invalid. Use at least 16 non-blank characters and redeploy. Existing encrypted configurations require their original key.",
+        DEPLOYMENT_DECRYPT_FAILED: "The saved deployment configuration cannot be decrypted. Restore the DEPLOYMENT_SECRET_KEY used when it was saved. Do not delete the deployment or replace the key with a random value.",
+        DEPLOYMENT_ASSET_OVERRIDE_INCOMPLETE: "Core asset overrides are incomplete. Remove the entire override group to use built-in assets, or supply its version, AMD64/ARM64 URLs and SHA-256 checksums, then redeploy.",
+        DEPLOYMENT_ASSET_INVALID: "A core asset URL, format or SHA-256 is invalid. Check HTTPS URLs, 64-character SHA-256 checksums and extracted binary hashes, or remove the entire override group and redeploy.",
+        DEPLOYMENT_PINNED_MANIFEST_INVALID: "TSUB_PINNED_CORE_MANIFEST is not valid JSON. Correct it or switch to the stable channel.",
+        DEPLOYMENT_PINNED_ASSET_MISSING: "The pinned manifest does not contain the selected core version. Complete TSUB_PINNED_CORE_MANIFEST or switch to the stable channel.",
+        DEPLOYMENT_STORAGE_UNAVAILABLE: "Deployment storage is unavailable. Check TSUB_DB/TSUB_KV bindings, storage mode and database initialization in the current environment, then redeploy.",
+        DEPLOYMENT_COMMAND_FAILED: "The deployment request did not complete. Refresh deployment and operation records to check whether it was saved before retrying. Keep the request ID for troubleshooting.",
+        REVISION_CONFLICT: "The deployment configuration changed. Reload it before submitting.",
+        auth: "Your session expired or you do not have permission. Sign in again and retry.",
+        network: "The controller could not be reached. Check the connection and refresh deployment records before retrying to avoid duplicates.",
+        timeout: "The request timed out. Refresh deployment records to check whether it was saved before retrying.",
+        unavailable: "The controller is unavailable. Older APIs may hide the cause. Check DEPLOYMENT_SECRET_KEY, core asset overrides and storage bindings, and keep the request ID.",
+        tooLarge: "The deployment configuration exceeds the request size limit. Reduce inbounds or configuration content and retry.",
+        rateLimited: "Too many requests. Try again later.",
+        invalidResponse: "The controller did not return a valid command. Check the network or gateway and refresh deployment records before retrying.",
+        requestId: "Request ID",
+      },
       errors: {
         maxInbounds: 'A deployment can contain at most 20 inbounds', loadDefaults: 'Failed to load system defaults', saveDefaults: 'Failed to save system defaults', resetDefaults: 'Failed to reset system defaults',
         nameRequired: 'Enter a deployment name', controlCommandInvalid: 'The server control command must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, and underscores (32 characters maximum)', sharedUuidInvalid: 'The shared UUID is invalid', randomPortRange: 'The random port range must be within 1-65535 and contain at least 20 ports',
@@ -2014,7 +2090,7 @@ export const messages = {
         protocolUuidInvalid: '{protocol} UUID is invalid', protocolTlsUnsupported: '{protocol} does not support this TLS mode', warpCredentials: 'Manual WARP requires complete imported WireGuard credentials', warpTerms: 'Automatic WARP requires accepting the Cloudflare WARP Terms of Service',
         edgeInboundRequired: 'Select at least one inbound for CDN nodes', edgeIncompatible: 'The selected inbound is incompatible with Cloudflare CDN or Tunnel', edgeAddressRequired: 'A CDN preferred address cannot be empty', edgeAddressDuplicate: 'CDN preferred addresses must be unique', edgeHostnameRequired: 'Enter the Cloudflare entry hostname', quickInboundRequired: 'Select one WebSocket inbound for Quick Tunnel', edgeCredentialsRequired: 'Managed Tunnel requires a Cloudflare Account ID and API Token', strictCertificateRequired: 'Cloudflare Full (strict) cannot use a self-signed origin certificate. Use ACME DNS-01 or an existing trusted certificate.',
         pinnedVersion: 'A pinned channel requires a core version', generateCommand: 'Failed to generate the command', loadTemplate: 'Failed to load the existing deployment configuration', selectTarget: 'Select an eligible deployment', configRevisionConflict: 'The deployment was changed in another page. Reload its configuration before submitting.', loadDeployments: 'Failed to load deployments', loadOperations: 'Failed to load operations',
-        v1Migration: 'Recreate this V1 record as a V2 deployment', offlineUseReinstall: 'Offline deployments cannot be updated. Use Reinstall instead.', deleteRecord: 'Delete failed', restoreSource: 'Could not restore the subscription source', cloudflareCleanup: 'Cloudflare cleanup failed; the deployment record is unchanged', copyCommand: 'Copy failed; select the command manually',
+        v1Migration: 'Recreate this V1 record as a V2 deployment', offlineUseReinstall: 'Offline deployments cannot be updated. Use Reinstall instead.', loadReuseTemplate: 'Could not load the reusable deployment template', deleteRecord: 'Delete failed', restoreSource: 'Could not restore the subscription source', cloudflareCleanup: 'Cloudflare cleanup failed; the deployment record is unchanged', copyCommand: 'Copy failed; select the command manually',
         coreProtocol: 'The {core} core does not support {protocol}', coreCombinationConflict: 'The selected protocols require different cores and cannot share one deployment', protocolTransportUnsupported: '{protocol} does not support the {transport} transport', protocolCombinationUnsupported: '{protocol} does not support {transport} + {tls}', realityWebSocketUnsupported: 'REALITY does not support WebSocket. Use TCP/RAW, gRPC, or XHTTP.', xhttpRequiresXrayVless: 'XHTTP requires VLESS + Xray', xhttpH3RequiresTls: 'XHTTP H3 requires TLS and cannot use REALITY or plaintext', realityKeyGeneration: 'This browser cannot generate X25519 Reality keys. Leave them empty so the proxy core can generate them.'
       },
       risk: {
@@ -2159,7 +2235,7 @@ export const messages = {
       notesLabel: 'Notes',
       notesPlaceholder: 'e.g. Price: $3/mo | Expires: 2024-12-31',
       nodeCacheTitle: 'Protect node cache',
-      nodeCacheDesc: 'Use last cache if fetch fails or returns empty nodes.',
+      nodeCacheDesc: 'Use the last cache when fetching fails or returns no nodes. Enable this, then refresh the subscription to use it as a chain proxy source.',
       plusAsSpaceTitle: '+ as space',
       plusAsSpaceDesc: 'Display + signs in node names as spaces',
       excludeTrafficTitle: 'Exclude traffic in merge',

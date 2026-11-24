@@ -9,6 +9,8 @@ vi.mock('../../src/lib/deployments.js', () => ({
   checkDeploymentEdgePermissions: vi.fn(), cleanupDeploymentCloudflareResources: vi.fn(),
   probeDeploymentEdge: vi.fn(),
   getDeploymentTemplate: vi.fn(),
+  listDeploymentChainSources: vi.fn(() => Promise.resolve({ success: true, data: { items: [], page: 1, totalPages: 1 } })),
+  previewDeploymentChainSource: vi.fn(),
   getDeploymentDefaults: vi.fn(() => Promise.resolve({ success: true, data: {} })),
   listDeploymentOperations: vi.fn(() => Promise.resolve({ success: true, data: [] })),
   listDeployments: vi.fn(() => Promise.resolve({ success: true, data: [] })),
@@ -16,7 +18,7 @@ vi.mock('../../src/lib/deployments.js', () => ({
 }));
 
 import DeploymentsView from '../../src/views/DeploymentsView.vue';
-import { checkDeploymentEdgePermissions, createDeployment, createDeploymentCommand, createRemoteDeploymentCommand, deleteDeployment, getDeploymentTemplate, listDeploymentOperations, listDeployments, probeDeploymentEdge, restoreDeploymentSource, saveDeploymentDefaults } from '../../src/lib/deployments.js';
+import { checkDeploymentEdgePermissions, createDeployment, createDeploymentCommand, createRemoteDeploymentCommand, deleteDeployment, getDeploymentTemplate, listDeploymentChainSources, listDeploymentOperations, listDeployments, previewDeploymentChainSource, probeDeploymentEdge, restoreDeploymentSource, saveDeploymentDefaults } from '../../src/lib/deployments.js';
 import { useDataStore } from '../../src/stores/useDataStore.js';
 import { createI18n } from '../../src/i18n/index.js';
 
@@ -203,6 +205,139 @@ describe('TSub Proxy simplified deployment generator', { timeout: 15_000 }, () =
     await firewallMode.setValue('false');
     expect(firewallMode.element.value).toBe('false');
     expect(wrapper.html()).not.toContain('mt-32');
+  });
+
+  it('loads and previews a fail-closed chain upstream for an individual inbound', async () => {
+    listDeploymentChainSources.mockImplementation(params => Promise.resolve({ success: true, data: {
+      items: params.view === 'groups' ? [{
+        sourceType: 'deployment', sourceId: 'upstream', name: 'Japan SoftBank', nodeCount: 1, protocols: ['vless'], updatedAt: '2026-10-31T00:00:00Z'
+      }] : [{
+        key: 'deployment:upstream:0', sourceType: 'deployment', sourceId: 'upstream', nodeKey: '0', name: 'Tokyo Upstream',
+        protocol: 'vless', address: 'upstream.example.com', port: 443, transport: 'ws', routeType: 'cdn',
+        preview: { protocol: 'vless', name: 'Tokyo Upstream', server: 'upstream.example.com', port: 443, transport: { type: 'ws' }, tls: { mode: 'tls' } }
+      }], page: 1, totalPages: 1
+    } }));
+    previewDeploymentChainSource.mockResolvedValue({ success: true, data: {
+      protocol: 'tuic', name: 'Pasted TUIC', address: 'tuic.example.com', port: 443, transport: 'quic', routeType: 'direct',
+      preview: { protocol: 'tuic', name: 'Pasted TUIC', server: 'tuic.example.com', port: 443, transport: { type: 'quic' }, tls: { mode: 'tls' } }
+    } });
+    wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="inbound-outbound-0"]').setValue('chain');
+    await flushPromises();
+    expect(wrapper.get('[data-testid="inbound-chain-0"] h4').text()).toBe('链式代理');
+    expect(wrapper.get('[data-testid="inbound-chain-0"]').text()).toContain('不会回退服务器直连');
+    expect(wrapper.get('[data-testid="chain-source-type-0"]').element.value).toBe('deployment');
+    expect(wrapper.find('[data-testid="chain-source-type-deployment-0"]').exists()).toBe(false);
+    expect(listDeploymentChainSources).toHaveBeenCalledWith(expect.objectContaining({ view: 'groups', source: 'deployment' }));
+    expect(wrapper.find('[data-testid="chain-source-item-0"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="chain-group-0"]').setValue('upstream');
+    await flushPromises();
+    expect(listDeploymentChainSources).toHaveBeenCalledWith(expect.objectContaining({ view: 'nodes', source: 'deployment', sourceId: 'upstream' }));
+    await wrapper.get('[data-testid="chain-source-item-0"]').trigger('click');
+    expect(wrapper.get('[data-testid="inbound-chain-0"]').text()).toContain('upstream.example.com:443');
+
+    await wrapper.get('[data-testid="chain-source-type-0"]').setValue('url');
+    await wrapper.get('[data-testid="chain-url-0"]').setValue('tuic://uuid:secret@tuic.example.com:443');
+    await wrapper.get('[data-testid="chain-preview-0"]').trigger('click');
+    await flushPromises();
+    expect(previewDeploymentChainSource).toHaveBeenCalledWith('tuic://uuid:secret@tuic.example.com:443');
+    expect(wrapper.get('[data-testid="inbound-chain-0"]').text()).toContain('Pasted TUIC');
+  });
+
+  it('groups subscription nodes and lists manual nodes directly', async () => {
+    listDeploymentChainSources.mockImplementation(params => Promise.resolve({ success: true, data: {
+      items: params.view === 'groups' ? [{
+        sourceType: 'subscription', sourceId: 'provider-1', name: 'Provider One', nodeCount: 1, protocols: ['trojan']
+      }] : [{
+        key: params.source === 'manual' ? 'manual:node-1' : 'subscription:provider-1:0', sourceType: params.source,
+        sourceId: params.source === 'manual' ? 'node-1' : 'provider-1', nodeKey: params.source === 'manual' ? 'node-1' : '0',
+        name: params.source === 'manual' ? 'Manual Node' : 'Provider Trojan', protocol: 'trojan', address: 'trojan.example.com',
+        port: 443, transport: 'tcp', routeType: 'direct', preview: { protocol: 'trojan', server: 'trojan.example.com', port: 443, transport: { type: 'tcp' } }
+      }], page: 1, totalPages: 1
+    } }));
+    wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="inbound-outbound-0"]').setValue('chain');
+    await flushPromises();
+    await wrapper.get('[data-testid="chain-source-type-0"]').setValue('subscription');
+    await flushPromises();
+    expect(listDeploymentChainSources).toHaveBeenCalledWith(expect.objectContaining({ view: 'groups', source: 'subscription' }));
+    await wrapper.get('[data-testid="chain-group-0"]').setValue('provider-1');
+    await flushPromises();
+    expect(listDeploymentChainSources).toHaveBeenCalledWith(expect.objectContaining({ view: 'nodes', source: 'subscription', sourceId: 'provider-1' }));
+    await wrapper.get('[data-testid="chain-source-item-0"]').trigger('click');
+    expect(wrapper.get('[data-testid="inbound-chain-0"]').text()).toContain('trojan.example.com:443');
+
+    await wrapper.get('[data-testid="chain-source-type-0"]').setValue('manual');
+    await flushPromises();
+    expect(wrapper.find('[data-testid="chain-group-0"]').exists()).toBe(false);
+    expect(listDeploymentChainSources).toHaveBeenCalledWith(expect.objectContaining({ view: 'nodes', source: 'manual', sourceId: '' }));
+    expect(wrapper.find('[data-testid="inbound-chain-0"] .bg-emerald-50').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="chain-source-item-0"]').text()).toContain('Manual Node');
+  });
+
+  it('shows a loading indicator while manual chain nodes are loading', async () => {
+    let resolveNodes;
+    listDeploymentChainSources.mockImplementation(params => {
+      if (params.source === 'manual') return new Promise(resolve => { resolveNodes = resolve; });
+      return Promise.resolve({ success: true, data: { items: [], page: 1, totalPages: 1 } });
+    });
+    wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="inbound-outbound-0"]').setValue('chain');
+    await flushPromises();
+    await wrapper.get('[data-testid="chain-source-type-0"]').setValue('manual');
+    await wrapper.vm.$nextTick();
+
+    const chainPanel = wrapper.get('[data-testid="inbound-chain-0"]');
+    expect(chainPanel.attributes('aria-busy')).toBe('true');
+    expect(chainPanel.get('[role="status"]').text()).toContain('正在加载节点');
+    expect(chainPanel.get('[data-testid="chain-search-0"]').attributes('disabled')).toBeDefined();
+
+    resolveNodes({ success: true, data: { items: [], page: 1, totalPages: 1 } });
+    await flushPromises();
+    expect(chainPanel.attributes('aria-busy')).toBe('false');
+    expect(chainPanel.text()).toContain('该来源没有可用节点');
+  });
+
+  it('retains the encrypted chain preview when an edited source no longer exists', async () => {
+    const deployment = {
+      id: 'chain-target', name: 'Chain Target', schemaVersion: 2, configRevision: 2, status: 'succeeded',
+      configSummary: { runtime: { core: 'xray' }, protocols: [{ protocol: 'vless', port: 443 }] }
+    };
+    listDeployments.mockResolvedValue({ success: true, data: [deployment] });
+    listDeploymentChainSources.mockResolvedValue({ success: true, data: { items: [], page: 1, totalPages: 1 } });
+    getDeploymentTemplate.mockResolvedValue({ success: true, data: {
+      deployment, configRevision: 2, retainedSecrets: true,
+      config: {
+        schemaVersion: 2, runtime: { tier: 'auto', core: 'xray', channel: 'stable' }, certificate: { mode: 'self-signed' },
+        firewall: { enabled: true }, subscription: { hostname: 'entry.example.com', server: { enabled: false } },
+        inbounds: [{
+          id: 'entry', name: 'Entry', protocol: 'vless', port: 443, transport: 'tcp', outbound: 'chain',
+          credentials: { uuid: '********' }, tls: { mode: 'reality', serverName: 'www.cloudflare.com', realityPrivateKey: '********', realityPublicKey: 'public' },
+          chain: {
+            source: { type: 'deployment', sourceId: 'removed-source', nodeKey: '0', key: 'deployment:removed-source:0', label: 'Removed Source' },
+            retainedCredentials: true,
+            snapshot: { protocol: 'vless', name: 'Retained Upstream', server: 'retained.example.com', port: 443, transport: { type: 'tcp' } }
+          }
+        }]
+      }
+    } });
+    wrapper = mountView();
+    await flushPromises();
+    await wrapper.get('[data-testid="deployment-tabs"] button:nth-child(2)').trigger('click');
+    await flushPromises();
+    await wrapper.findAll('button').find(button => button.text() === '更新配置').trigger('click');
+    Array.from(document.body.querySelectorAll('button')).find(button => button.textContent === '载入配置').click();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="inbound-chain-0"]').text()).toContain('retained.example.com:443');
+    expect(wrapper.get('[data-testid="inbound-chain-0"]').text()).toContain('原链式来源已不存在');
+    expect(listDeploymentChainSources).toHaveBeenCalledWith(expect.objectContaining({ view: 'groups', source: 'deployment', deploymentId: 'chain-target' }));
   });
 
   it('shows certificate inputs next to the selected certificate strategy', async () => {
@@ -422,6 +557,38 @@ describe('TSub Proxy simplified deployment generator', { timeout: 15_000 }, () =
     expect(source).toContain(':global(.dark .deployment-risk-panel)');
     expect(source).toContain('dark:border-emerald-400/35 dark:text-emerald-300');
     expect(source).toContain('dark:border-red-400/35 dark:text-red-300');
+  });
+
+  it('keeps actionable command errors visible and clears old commands across retries', async () => {
+    wrapper = mountView();
+    await flushPromises();
+    await wrapper.find('input[placeholder="HK Edge"]').setValue('Diagnostic deployment');
+    const submit = async () => {
+      await wrapper.find('form').trigger('submit');
+      await flushPromises();
+      document.querySelector('[data-testid="deployment-risk-panel"] button:last-child').click();
+      await flushPromises();
+    };
+    createDeployment.mockResolvedValueOnce({ data: { deployment: { id: 'fixture-deployment' }, command: 'curl old-command', wgetCommand: 'wget old-command' } });
+    await submit();
+    expect(wrapper.get('[data-testid="deployment-command-panel"] textarea').element.value).toContain('old-command');
+    createDeployment.mockRejectedValueOnce({ status: 503, data: { code: 'DEPLOYMENT_KEY_MISSING', requestId: 'fixture-request-1' } });
+    await submit();
+    const alert = wrapper.get('[data-testid="deployment-command-error"]');
+    expect(alert.attributes('role')).toBe('alert');
+    expect(alert.text()).toContain('DEPLOYMENT_SECRET_KEY');
+    expect(alert.text()).toContain('重新部署');
+    expect(alert.text()).toContain('HTTP 503');
+    expect(alert.text()).toContain('fixture-request-1');
+    expect(wrapper.get('[data-testid="deployment-command-panel"] textarea').element.value).toBe('');
+    createDeployment.mockResolvedValueOnce('<html>gateway-body</html>');
+    await submit();
+    expect(wrapper.get('[data-testid="deployment-command-error"]').text()).toContain('未返回有效命令');
+    expect(wrapper.get('[data-testid="deployment-command-error"]').text()).not.toContain('gateway-body');
+    createDeployment.mockResolvedValueOnce({ data: { deployment: { id: 'fixture-new' }, command: 'curl new', wgetCommand: 'wget new' } });
+    await submit();
+    expect(wrapper.find('[data-testid="deployment-command-error"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="deployment-command-panel"] textarea').element.value).toBe('wget new');
   });
 
   it('sends the server control command only with the current deployment', async () => {
@@ -903,6 +1070,63 @@ describe('TSub Proxy simplified deployment generator', { timeout: 15_000 }, () =
     expect(wrapper.text()).toContain('The xray core does not support TUIC v5');
   });
 
+  it('selectively reuses a masked deployment template without cloning source secrets', async () => {
+    const deployment = {
+      id: 'deploy-reuse', name: 'Tokyo Edge', schemaVersion: 2, configRevision: 3, status: 'succeeded', updatedAt: '2026-10-30T12:00:00.000Z'
+    };
+    getDeploymentTemplate.mockResolvedValue({
+      success: true,
+      data: {
+        deployment, configRevision: 3, retainedSecrets: true,
+        config: {
+          schemaVersion: 2,
+          runtime: { tier: 'small', core: 'sing-box', channel: 'stable', controlCommand: 'tsub' },
+          certificate: { mode: 'self-signed' }, warp: { provisioning: 'auto', acceptedTerms: false }, firewall: { enabled: true }, edge: { mode: 'disabled' },
+          subscription: { hostname: '203.0.113.10', server: { enabled: true, port: 51250, token: '********', pushEnabled: true, traffic: { enabled: true } } },
+          inbounds: [
+            { id: 'source-vless', name: 'Tokyo-VLESS', protocol: 'vless', port: 443, transport: 'tcp', outbound: 'direct', credentials: { uuid: '********' }, tls: { mode: 'reality', serverName: 'www.cloudflare.com', realityPrivateKey: '********', realityPublicKey: 'PUBLIC', shortId: 'abcd' }, transportOptions: { path: '/' } },
+            { id: 'source-vmess', name: 'Tokyo-VMess', protocol: 'vmess', port: 8443, transport: 'ws', outbound: 'direct', credentials: { uuid: '********' }, tls: { mode: 'none' }, transportOptions: { path: '/vmess' } }
+          ]
+        }
+      }
+    });
+    listDeployments.mockResolvedValue({ success: true, data: [deployment] });
+    createDeployment.mockResolvedValue({ data: { deployment: { id: 'deploy-new' }, command: 'install command', wgetCommand: 'install wget', expiresAt: '' } });
+    wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="deployment-source-manual"]').attributes('aria-pressed')).toBe('true');
+    await wrapper.get('[data-testid="deployment-source-reuse"]').trigger('click');
+    await wrapper.get('[data-testid="deployment-reuse-source"]').setValue('deploy-reuse');
+    await flushPromises();
+    expect(wrapper.get('[data-testid="deployment-reuse-summary"]').text()).toContain('入站 2 个');
+    expect(wrapper.get('[data-testid="deployment-apply-reuse"]').classes()).toContain('bg-primary-600');
+    expect(wrapper.get('[data-testid="reuse-inbound-choice-0"]').element.checked).toBe(true);
+    expect(wrapper.get('[data-testid="reuse-inbound-choice-1"]').element.checked).toBe(true);
+    await wrapper.get('[data-testid="reuse-inbound-choice-1"]').setValue(false);
+    await wrapper.get('[data-testid="deployment-apply-reuse"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('input[placeholder="HK Edge"]').element.value).toBe('Tokyo Edge-副本');
+    expect(wrapper.get('[data-testid="inbound-node-name"]').element.value).toBe('Tokyo-VLESS');
+    expect(wrapper.get('[data-testid="inbound-port"]').element.value).toBe('');
+    await wrapper.get('[data-testid="inbound-more-0"]').trigger('click');
+    expect(wrapper.get('[data-testid="inbound-uuid"]').element.value).toBe('');
+    expect(wrapper.get('[data-testid="reality-private-key"]').element.value).toBe('');
+    expect(wrapper.get('[data-testid="reality-public-key"]').element.value).toBe('');
+    expect(wrapper.findAll('[data-testid="inbound-protocol"]')).toHaveLength(1);
+
+    await wrapper.find('form').trigger('submit');
+    await flushPromises();
+    document.querySelector('[data-testid="deployment-risk-panel"] button:last-child').click();
+    await flushPromises();
+    expect(createDeployment).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'Tokyo Edge-副本',
+      config: expect.objectContaining({ inbounds: [expect.objectContaining({ name: 'Tokyo-VLESS', port: null, outbound: 'direct' })] })
+    }));
+    expect(createDeployment.mock.calls.at(-1)[0]).not.toHaveProperty('cloneFromDeploymentId');
+  });
+
   it('loads an existing deployment for update, reuses it safely, and exposes uninstall mode', async () => {
     const deployment = {
       id: 'deploy-template', name: 'Singapore Edge', schemaVersion: 2, configRevision: 4, status: 'succeeded',
@@ -1252,6 +1476,19 @@ describe('TSub Proxy simplified deployment generator', { timeout: 15_000 }, () =
       await flushPromises();
       expect(document.querySelector('[data-testid="deployment-operation-command-dialog"]')).toBeNull();
     }
+  });
+
+  it('shows errors for existing deployment commands without opening a stale command modal', async () => {
+    listDeployments.mockResolvedValue({ success: true, data: [{ id: 'fixture-operation', name: 'Test deployment', schemaVersion: 2, status: 'succeeded', configSummary: { protocols: [], runtime: { core: 'xray' } } }] });
+    createDeploymentCommand.mockRejectedValueOnce({ status: 503, data: { code: 'DEPLOYMENT_DECRYPT_FAILED', requestId: 'fixture-operation-request' } });
+    wrapper = mountView();
+    await flushPromises();
+    await wrapper.findAll('button').find(button => button.text() === '部署记录').trigger('click');
+    await wrapper.findAll('button').find(button => button.text() === '获取状态').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[data-testid="deployment-command-error"]').text()).toContain('无法解密');
+    expect(wrapper.get('[data-testid="deployment-command-error"]').text()).toContain('fixture-operation-request');
+    expect(document.querySelector('[data-testid="deployment-operation-command-dialog"]')).toBeNull();
   });
 
   it('confirms mutating operations before opening their independent command modal', async () => {

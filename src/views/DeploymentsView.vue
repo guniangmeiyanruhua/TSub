@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { storeToRefs } from 'pinia';
 import { useDataStore } from '../stores/useDataStore.js';
 import { useToastStore } from '../stores/toast.js';
-import { DEPLOYMENT_ACTIONS, NATIVE_TRANSPORT_LABELS, OUTBOUND_OPTIONS, PROTOCOL_OPTIONS, RESOURCE_TIERS, RUNTIME_VERSION, TRANSPORT_OPTIONS } from '../constants/deployment-options.js';
+import { DEPLOYMENT_ACTIONS, INBOUND_OUTBOUND_OPTIONS, NATIVE_TRANSPORT_LABELS, OUTBOUND_OPTIONS, PROTOCOL_OPTIONS, RESOURCE_TIERS, RUNTIME_VERSION, TRANSPORT_OPTIONS } from '../constants/deployment-options.js';
 import {
   canonicalTransport, compatibleCoresForInbound, compatibleCoresForInbounds,
   edgeCompatibilityReason, isConfigurableTransportProtocol, isQuickTunnelCompatible, protocolCapability,
@@ -11,9 +11,11 @@ import {
 } from '../../shared/deployment-capabilities.js';
 import {
   checkDeploymentEdgePermissions, cleanupDeploymentCloudflareResources, createDeployment, createDeploymentCommand, createRemoteDeploymentCommand, deleteDeployment, getDeploymentDefaults, getDeploymentTemplate, provisionLocalExecutor, restoreDeploymentSource,
-  listDeploymentOperations, listDeployments, probeDeploymentEdge, resetDeploymentDefaults, saveDeploymentDefaults
+  listDeploymentChainSources, listDeploymentOperations, listDeployments, previewDeploymentChainSource, probeDeploymentEdge, resetDeploymentDefaults, saveDeploymentDefaults
 } from '../lib/deployments.js';
 import { useI18n } from '../i18n/index.js';
+import { DEFAULT_REUSE_OPTIONS, buildReusableDeploymentConfig, deploymentReuseSummary } from '../lib/deployment-reuse.js';
+import { assertDeploymentCommandResult, formatDeploymentError } from '../lib/deployment-errors.js';
 import SecretInput from '../components/forms/SecretInput.vue';
 import PushHistoryModal from '../components/modals/PushHistoryModal.vue';
 import DeploymentHelpLabel from '../components/deployments/DeploymentHelpLabel.vue';
@@ -58,6 +60,12 @@ const PREFERRED_DOMAIN_PRESETS = Object.freeze([
   { key: 'nexusMods', address: 'staticdelivery.nexusmods.com' },
   { key: 'timeIs', address: 'time.is' }
 ]);
+const CHAIN_SOURCE_TYPES = Object.freeze(['deployment', 'subscription', 'manual', 'url']);
+const CHAIN_PROTOCOL_CORES = Object.freeze({
+  vless: ['xray', 'sing-box'], vmess: ['xray', 'sing-box'], trojan: ['xray', 'sing-box'], shadowsocks: ['xray', 'sing-box'],
+  socks5: ['xray', 'sing-box'], http: ['xray', 'sing-box'], https: ['xray', 'sing-box'], hysteria2: ['xray', 'sing-box'],
+  wireguard: ['xray', 'sing-box'], tuic: ['sing-box'], anytls: ['sing-box'], naive: ['sing-box'], snell: ['sing-box']
+});
 const activeTab = ref(readPersistedDeploymentTab());
 persistDeploymentTab(activeTab.value);
 watch(activeTab, persistDeploymentTab);
@@ -67,6 +75,13 @@ const preparedUpdateTargetId = ref('');
 const templateSourceId = ref('');
 const templateConfigRevision = ref(0);
 const retainedSecrets = ref(false);
+const configSourceMode = ref('manual');
+const reuseSourceId = ref('');
+const reuseTemplate = ref(null);
+const reuseLoading = ref(false);
+const reuseOptions = reactive({ ...DEFAULT_REUSE_OPTIONS });
+const reuseInboundSelections = ref([]);
+const reuseInboundSecretMappings = ref([]);
 const showLoadConfigDialog = ref(false);
 const pendingTemplateRecord = ref(null);
 const pendingTemplateRemote = ref(false);
@@ -104,6 +119,23 @@ const remoteMenuId = ref('');
 const remoteMenuAlignment = ref('right');
 const deploymentInfoPopoverKey = ref('');
 const output = reactive({ curl: '', wget: '', diagnosticCurl: '', diagnosticWget: '', expiresAt: '', client: 'wget', diagnostic: false });
+const commandError = ref(null);
+const commandErrorRef = ref(null);
+function clearCommandResult() {
+  commandError.value = null;
+  for (const target of [output, operationOutput]) {
+    Object.assign(target, { curl: '', wget: '', diagnosticCurl: '', diagnosticWget: '', expiresAt: '' });
+  }
+  showOperationCommandModal.value = false;
+}
+function reportCommandError(error) {
+  const detail = formatDeploymentError(error, t);
+  const serviceCode = error?.data?.error || error?.data?.code || '';
+  if (serviceCode === 'invalid_cloudflare_edge_credentials' || String(serviceCode).startsWith('cloudflare_edge_')) detail.message = edgePermissionErrorText(serviceCode);
+  commandError.value = detail;
+  toast.showToast(detail.message, 'error');
+  nextTick(() => commandErrorRef.value?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }));
+}
 const operationOutput = reactive({ curl: '', wget: '', diagnosticCurl: '', diagnosticWget: '', expiresAt: '', client: 'wget', diagnostic: false, deploymentName: '', action: '' });
 const confirmedOperationActions = new Set(['update', 'update-runtime', 'rollback-runtime', 'restart', 'repair', 'rollback', 'uninstall']);
 const deploymentPollIntervalMs = 5000;
@@ -141,7 +173,10 @@ const newInbound = () => ({
   id: `inbound-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`, protocol: 'vless', port: '', expanded: false,
   name: '', transport: '', outbound: '', tlsMode: '', serverName: '', host: '', uuid: '', username: '', password: '', path: '', serviceName: '',
   certificatePath: '', keyPath: '', realityPrivateKey: '', realityPublicKey: '', shortId: '',
-  xhttpMode: 'auto', xhttpVersion: 'auto', bandwidthUp: '', bandwidthDown: '', udpHopPorts: '', udpHopInterval: '', edgeMode: 'direct'
+  xhttpMode: 'auto', xhttpVersion: 'auto', bandwidthUp: '', bandwidthDown: '', udpHopPorts: '', udpHopInterval: '', edgeMode: 'direct',
+  chainSourceType: 'deployment', chainSource: null, chainPreview: null, chainUrl: '', chainSearch: '', chainProtocol: '',
+  chainGroupId: '', chainGroups: [], chainGroupPage: 1, chainGroupTotalPages: 1, chainSourceMissing: false,
+  chainSources: [], chainLoading: false, chainLoadError: '', chainRequestId: 0, chainPage: 1, chainTotalPages: 1
 });
 
 const global = reactive(blankGlobal());
@@ -151,6 +186,20 @@ const selectedDeployment = computed(() => deployments.value.find(item => item.id
 const targetDeployment = computed(() => deployments.value.find(item => item.id === targetDeploymentId.value));
 const eligibleDeployments = computed(() => deployments.value.filter(item => !item.demo && item.schemaVersion === 2
   && (!remoteUpdate.value || (item.status !== 'offline' && item.agent?.online))));
+const reuseEligibleDeployments = computed(() => deployments.value.filter(item => !item.demo && item.schemaVersion === 2));
+const reuseSummary = computed(() => reuseTemplate.value
+  ? deploymentReuseSummary({ ...(reuseTemplate.value.config || {}), deployment: reuseTemplate.value.sourceDeployment })
+  : null);
+const reuseInboundChoices = computed(() => (Array.isArray(reuseTemplate.value?.config?.inbounds)
+  ? reuseTemplate.value.config.inbounds.slice(0, 20).map((item, index) => ({
+    index,
+    protocol: String(item.protocol || '-').toUpperCase(),
+    name: String(item.name || ''),
+    port: item.port ?? ''
+  }))
+  : []));
+const canApplyReuse = computed(() => Boolean(reuseTemplate.value) && !reuseLoading.value
+  && (!reuseOptions.inbounds || reuseInboundSelections.value.length > 0));
 const visibleDeploymentActions = computed(() => DEPLOYMENT_ACTIONS.filter(([action]) => !['plan', 'apply'].includes(action)));
 const showEditableConfig = computed(() => deploymentMode.value === 'install'
   || (deploymentMode.value === 'update' && preparedUpdateTargetId.value && preparedUpdateTargetId.value === targetDeploymentId.value));
@@ -169,10 +218,13 @@ const pendingOperationMessage = computed(() => {
   });
 });
 const estimatedCore = computed(() => {
-  const candidates = compatibleCoresForInbounds(form.inbounds.map(item => capabilityShape(item)));
+  let candidates = compatibleCoresForInbounds(form.inbounds.map(item => capabilityShape(item)));
+  for (const inbound of form.inbounds.filter(item => effective(item, 'outbound') === 'chain' && item.chainPreview?.protocol)) {
+    candidates = candidates.filter(core => (CHAIN_PROTOCOL_CORES[inbound.chainPreview.protocol] || []).includes(core));
+  }
   return candidates.includes('xray') ? 'xray' : (candidates[0] || '');
 });
-const needsWarp = computed(() => form.inbounds.some(item => effective(item, 'outbound') !== 'direct'));
+const needsWarp = computed(() => form.inbounds.some(item => effective(item, 'outbound').startsWith('warp-')));
 const edgeEnabled = computed(() => Boolean(global.edge?.mode && global.edge.mode !== 'disabled'));
 const quickInboundCandidates = computed(() => form.inbounds.filter(item => quickInboundEligible(item)));
 const selectedCore = computed(() => global.runtime.core === 'auto' ? estimatedCore.value : global.runtime.core);
@@ -193,7 +245,7 @@ const sharedTlsScope = computed(() => {
 });
 const compatibilityErrors = computed(() => {
   const errors = form.inbounds.map(inbound => inboundCompatibilityError(inbound)).filter(Boolean);
-  if (!compatibleCoresForInbounds(form.inbounds.map(item => capabilityShape(item))).length) errors.push(t('deployments.errors.coreCombinationConflict'));
+  if (!estimatedCore.value) errors.push(t('deployments.errors.coreCombinationConflict'));
   return errors;
 });
 const edgeDetectionReady = computed(() => ['manual', 'managed'].includes(global.edge.mode)
@@ -332,6 +384,9 @@ function systemDetailRows(deployment) {
   const subscription = configSummary.subscriptionServer?.enabled
     ? `${configSummary.subscriptionServer.port || '-'}${configSummary.subscriptionServer.trafficEnabled ? ` · ${t('deployments.trafficSummary')}` : ''}`
     : t('common.disabled');
+  const chainSummary = configSummary.chain?.count
+    ? [t('deployments.record.chainCount', { count: configSummary.chain.count }), ...(configSummary.chain.protocols || []), ...(configSummary.chain.sourceTypes || []).map(type => t(`deployments.chain.sources.${type}`))].join(' · ')
+    : t('common.disabled');
   return [
     [t('deployments.record.nodeAddress'), deploymentAddressSummary(deployment)],
     [t('deployments.record.addressMode'), configSummary.addressMode || '-'],
@@ -343,6 +398,7 @@ function systemDetailRows(deployment) {
     [t('deployments.record.containerInit'), [capabilitiesInfo.container, capabilitiesInfo.init].filter(Boolean).join(' / ') || '-'],
     [t('deployments.record.memory'), deploymentMemorySummary(deployment)],
     [t('deployments.record.protocols'), protocols],
+    [t('deployments.record.chainUpstreams'), chainSummary],
     [t('deployments.record.tls'), configSummary.selfSigned ? t('deployments.selfSignedSummary') : '-'],
     [t('deployments.record.subscription'), subscription],
     [t('deployments.record.trafficBackend'), trafficBackendText(capabilitiesInfo.trafficBackend) || '-'],
@@ -358,6 +414,7 @@ function heartbeatDetailRows(deployment) {
     [t('deployments.record.pollInterval'), heartbeat.pollIntervalSeconds ? t('deployments.options.seconds', { seconds: heartbeat.pollIntervalSeconds }) : '-'],
     [t('deployments.record.hostname'), heartbeat.hostname || '-'],
     [t('deployments.record.configRevision'), heartbeat.configRevision || deployment.configRevision || '-'],
+    [t('deployments.record.chainUpstreams'), heartbeat.chainInboundCount ? [t('deployments.record.chainCount', { count: heartbeat.chainInboundCount }), heartbeat.chainProtocols, heartbeat.chainSourceTypes].filter(Boolean).join(' · ') : t('common.disabled')],
     [t('deployments.record.currentCommand'), heartbeat.currentCommandId || t('deployments.record.noCurrentCommand')]
   ].map(([label, value]) => ({ label, value }));
 }
@@ -409,11 +466,12 @@ function updateSharedServerName() {
   syncSelfSignedTlsServerNames();
 }
 function capabilityShape(inbound, overrides = {}) {
+  const outbound = overrides.outbound || effective(inbound, 'outbound');
   return {
     protocol: inbound.protocol,
     transport: overrides.transport || effective(inbound, 'transport'),
     tlsMode: overrides.tlsMode || effective(inbound, 'tlsMode'),
-    outbound: overrides.outbound || effective(inbound, 'outbound')
+    outbound: outbound === 'chain' ? 'direct' : outbound
   };
 }
 function tlsOptions(inbound) {
@@ -424,6 +482,15 @@ function nativeTransportLabel(inbound) { return NATIVE_TRANSPORT_LABELS[inbound.
 function transportConfigurable(inbound) { return isConfigurableTransportProtocol(inbound.protocol); }
 function coreSupportsProtocol(core, protocol) { return protocolInfo(protocol).cores.includes(core); }
 function protocolDisabled(protocol) { return global.runtime.core !== 'auto' && !coreSupportsProtocol(global.runtime.core, protocol); }
+function outboundDisabled(inbound, outbound) {
+  if (outbound === 'chain') {
+    if (inbound.protocol === 'naive') return true;
+    const cores = inbound.chainPreview?.protocol ? (CHAIN_PROTOCOL_CORES[inbound.chainPreview.protocol] || []) : ['xray', 'sing-box'];
+    return global.runtime.core !== 'auto' && !cores.includes(global.runtime.core);
+  }
+  return !protocolCapability(inbound.protocol).outbounds.includes(outbound);
+}
+function sharedOutboundDisabled(outbound) { return form.inbounds.some(inbound => outboundDisabled(inbound, outbound)); }
 function transportDisabled(inbound, transport) {
   if (!transportConfigurable(inbound) || !transportsForProtocol(inbound.protocol, global.runtime.core).includes(transport)) return true;
   const allowedTls = tlsModesForProtocol(inbound.protocol, transport, global.runtime.core);
@@ -435,6 +502,14 @@ function transportDisabled(inbound, transport) {
   return global.runtime.core === 'auto' ? !candidates.length : !candidates.includes(global.runtime.core);
 }
 function inboundCompatibilityError(inbound) {
+  if (effective(inbound, 'outbound') === 'chain') {
+    if (inbound.protocol === 'naive') return t('deployments.chain.naiveInboundUnsupported');
+    if (!inbound.chainPreview) return t('deployments.chain.sourceRequired');
+    const upstreamCores = CHAIN_PROTOCOL_CORES[inbound.chainPreview.protocol] || [];
+    if (global.runtime.core !== 'auto' && !upstreamCores.includes(global.runtime.core)) {
+      return t('deployments.chain.coreUnsupported', { core: global.runtime.core, protocol: String(inbound.chainPreview.protocol || '').toUpperCase() });
+    }
+  }
   const shape = capabilityShape(inbound);
   if (!transportsForProtocol(shape.protocol).includes(shape.transport)) return t('deployments.errors.protocolTransportUnsupported', { protocol: protocolInfo(inbound.protocol).label, transport: shape.transport });
   if (!tlsModesForProtocol(shape.protocol, shape.transport).includes(shape.tlsMode)) {
@@ -485,6 +560,12 @@ function nodeNamePlaceholder(inbound) {
 
 function updateProtocol(inbound) {
   const capability = protocolCapability(inbound.protocol);
+  if (inbound.protocol === 'naive' && effective(inbound, 'outbound') === 'chain') {
+    inbound.outbound = 'direct';
+    inbound.chainSource = null;
+    inbound.chainPreview = null;
+    inbound.chainUrl = '';
+  }
   inbound.transport = capability?.nativeTransport || '';
   if (inbound.tlsMode && !tlsOptions(inbound).includes(inbound.tlsMode)) inbound.tlsMode = '';
   if (effective(inbound, 'tlsMode') !== 'reality') {
@@ -524,9 +605,155 @@ function updateCore() {
   }
 }
 async function updateOutbound(inbound) {
+  if (effective(inbound, 'outbound') === 'chain') {
+    inbound.expanded = true;
+    await initializeChainSource(inbound);
+    return;
+  }
+  inbound.chainSource = null;
+  inbound.chainPreview = null;
+  inbound.chainUrl = '';
   if (!effective(inbound, 'outbound').startsWith('warp')) return;
   await nextTick();
   warpSettingsRef.value?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+}
+
+function groupedChainSource(type) {
+  return type === 'deployment' || type === 'subscription';
+}
+
+function resetChainNodeSelection(inbound, { preservePreview = false } = {}) {
+  inbound.chainSource = null;
+  if (!preservePreview) inbound.chainPreview = null;
+  inbound.chainSources = [];
+  inbound.chainLoading = false;
+  inbound.chainLoadError = '';
+  inbound.chainRequestId = Number(inbound.chainRequestId || 0) + 1;
+  inbound.chainPage = 1;
+  inbound.chainTotalPages = 1;
+  inbound.chainSourceMissing = false;
+}
+
+async function loadChainGroups(inbound, append = false) {
+  if (!groupedChainSource(inbound.chainSourceType)) return;
+  const requestId = Number(inbound.chainRequestId || 0) + 1;
+  inbound.chainRequestId = requestId;
+  inbound.chainLoading = true;
+  inbound.chainLoadError = '';
+  try {
+    const page = append ? inbound.chainGroupPage + 1 : 1;
+    const result = await listDeploymentChainSources({
+      view: 'groups',
+      source: inbound.chainSourceType,
+      deploymentId: deploymentMode.value === 'update' ? targetDeploymentId.value : '',
+      page,
+      pageSize: 100
+    });
+    if (requestId !== inbound.chainRequestId) return;
+    const data = result.data || {};
+    inbound.chainGroups = append ? [...inbound.chainGroups, ...(data.items || [])] : (data.items || []);
+    inbound.chainGroupPage = Number(data.page || page);
+    inbound.chainGroupTotalPages = Number(data.totalPages || 1);
+    if (inbound.chainGroupId && inbound.chainGroups.some(item => item.sourceId === inbound.chainGroupId)) inbound.chainSourceMissing = false;
+    else if (inbound.chainGroupId && inbound.chainGroupPage >= inbound.chainGroupTotalPages) inbound.chainSourceMissing = true;
+  } catch {
+    if (requestId !== inbound.chainRequestId) return;
+    inbound.chainLoadError = 'groups';
+    toast.showToast(t('deployments.chain.loadFailed'), 'error');
+  } finally {
+    if (requestId === inbound.chainRequestId) inbound.chainLoading = false;
+  }
+}
+
+async function loadChainSources(inbound, append = false) {
+  if (!CHAIN_SOURCE_TYPES.includes(inbound.chainSourceType) || inbound.chainSourceType === 'url') return;
+  if (groupedChainSource(inbound.chainSourceType) && !inbound.chainGroupId) {
+    inbound.chainSources = [];
+    return;
+  }
+  const requestId = Number(inbound.chainRequestId || 0) + 1;
+  inbound.chainRequestId = requestId;
+  inbound.chainLoading = true;
+  inbound.chainLoadError = '';
+  try {
+    const page = append ? inbound.chainPage + 1 : 1;
+    const result = await listDeploymentChainSources({
+      view: 'nodes',
+      source: inbound.chainSourceType,
+      sourceId: groupedChainSource(inbound.chainSourceType) ? inbound.chainGroupId : '',
+      query: inbound.chainSearch.trim(),
+      protocol: inbound.chainProtocol,
+      deploymentId: deploymentMode.value === 'update' ? targetDeploymentId.value : '',
+      page,
+      pageSize: 40
+    });
+    if (requestId !== inbound.chainRequestId) return;
+    const data = result.data || {};
+    inbound.chainSources = append ? [...inbound.chainSources, ...(data.items || [])] : (data.items || []);
+    inbound.chainPage = Number(data.page || page);
+    inbound.chainTotalPages = Number(data.totalPages || 1);
+    if (inbound.chainSource && inbound.chainSources.some(item => item.key === inbound.chainSource.key)) inbound.chainSourceMissing = false;
+    else if (inbound.chainSource && inbound.chainPage >= inbound.chainTotalPages) inbound.chainSourceMissing = true;
+  } catch {
+    if (requestId !== inbound.chainRequestId) return;
+    if (inbound.chainSource) inbound.chainSourceMissing = true;
+    inbound.chainLoadError = 'nodes';
+    toast.showToast(t('deployments.chain.loadFailed'), 'error');
+  } finally {
+    if (requestId === inbound.chainRequestId) inbound.chainLoading = false;
+  }
+}
+
+async function initializeChainSource(inbound) {
+  if (inbound.chainSourceType === 'url') return;
+  if (groupedChainSource(inbound.chainSourceType)) {
+    if (!inbound.chainGroups.length) await loadChainGroups(inbound);
+    if (inbound.chainGroupId && !inbound.chainSourceMissing && !inbound.chainSources.length) await loadChainSources(inbound);
+    return;
+  }
+  if (!inbound.chainSources.length) await loadChainSources(inbound);
+}
+
+async function setChainSourceType(inbound) {
+  resetChainNodeSelection(inbound);
+  inbound.chainUrl = '';
+  inbound.chainSearch = '';
+  inbound.chainProtocol = '';
+  inbound.chainGroupId = '';
+  inbound.chainGroups = [];
+  inbound.chainGroupPage = 1;
+  inbound.chainGroupTotalPages = 1;
+  inbound.chainLoadError = '';
+  await initializeChainSource(inbound);
+}
+
+async function setChainGroup(inbound) {
+  resetChainNodeSelection(inbound);
+  inbound.chainSearch = '';
+  inbound.chainProtocol = '';
+  if (inbound.chainGroupId) await loadChainSources(inbound);
+}
+
+function selectChainSource(inbound, item) {
+  inbound.chainSource = {
+    type: item.sourceType, key: item.key, sourceId: item.sourceId, nodeKey: item.nodeKey,
+    label: item.sourceLabel || item.name, routeType: item.routeType || 'direct', refresh: true
+  };
+  inbound.chainPreview = { ...(item.preview || {}), protocol: item.protocol, name: item.name, server: item.address, port: item.port };
+  inbound.chainSourceMissing = false;
+}
+
+async function previewChainUrl(inbound) {
+  if (!inbound.chainUrl.trim()) return toast.showToast(t('deployments.chain.urlRequired'), 'warning');
+  inbound.chainLoading = true;
+  inbound.chainLoadError = '';
+  try {
+    const result = await previewDeploymentChainSource(inbound.chainUrl.trim());
+    const item = result.data || {};
+    inbound.chainSource = { type: 'url', key: '', sourceId: '', nodeKey: '', label: item.name || '', routeType: 'direct', refresh: true };
+    inbound.chainPreview = { ...(item.preview || {}), protocol: item.protocol, name: item.name, server: item.address, port: item.port };
+  } catch { toast.showToast(t('deployments.chain.previewFailed'), 'error'); }
+  finally { inbound.chainLoading = false; }
 }
 function updateCertificateMode() {
   if (global.certificate.mode === 'self-signed') syncSelfSignedTlsServerNames();
@@ -820,7 +1047,11 @@ function hydrateGlobal(value) {
 }
 
 function visibleSecret(value) { return value === '********' ? '' : (value || ''); }
-function hydrateDeploymentTemplate(payload, mode) {
+function hydrateDeploymentTemplate(payload, mode, options = {}) {
+  const preserveNodeNames = options.preserveNodeNames === true;
+  const selectiveReuse = options.selectiveReuse === true;
+  const preserveSecrets = options.preserveSecrets === true;
+  const preserveWarpIdentity = options.preserveWarpIdentity === true;
   const config = payload.config || {};
   const deployment = payload.deployment || {};
   const next = blankGlobal();
@@ -831,7 +1062,7 @@ function hydrateDeploymentTemplate(payload, mode) {
   next.certificate.apiToken = visibleSecret(next.certificate.apiToken);
   Object.assign(next.warp, config.warp || {});
   next.warp.privateKey = visibleSecret(next.warp.privateKey);
-  if (mode === 'install') Object.assign(next.warp, { privateKey: '', peerPublicKey: '', ipv4: '', ipv6: '' });
+  if (mode === 'install' && !preserveWarpIdentity) Object.assign(next.warp, { privateKey: '', peerPublicKey: '', ipv4: '', ipv6: '' });
   Object.assign(next.edge, config.edge || {});
   next.edge.cloudflare = { ...next.edge.cloudflare, ...(config.edge?.cloudflare || {}) };
   next.edge.cloudflare.apiToken = visibleSecret(next.edge.cloudflare.apiToken);
@@ -844,8 +1075,8 @@ function hydrateDeploymentTemplate(payload, mode) {
   next.credentials.sharedUuidEnabled = payload.editor?.sharedUuidEnabled === true;
   next.credentials.sharedPasswordEnabled = payload.editor?.sharedPasswordEnabled === true;
   Object.assign(next.randomPorts, payload.editor?.randomPorts || {});
-  next.credentials.uuid = '';
-  next.credentials.password = '';
+  next.credentials.uuid = preserveSecrets ? visibleSecret(config.credentials?.uuid) : '';
+  next.credentials.password = preserveSecrets ? visibleSecret(config.credentials?.password) : '';
   next.deployment.hostname = config.subscription?.hostname || '';
   next.deployment.namePrefix = config.subscription?.namePrefix || 'TSub';
   next.deployment.nodeNameMode = payload.editor?.nodeNameMode || 'deployment-protocol-port';
@@ -873,29 +1104,42 @@ function hydrateDeploymentTemplate(payload, mode) {
   const hydratedInbounds = (config.inbounds || []).map((item, index) => ({
     ...newInbound(),
     id: item.id || `inbound-${index + 1}`,
-    name: mode === 'install' ? '' : (item.name || ''), protocol: item.protocol || 'vless', port: item.port || '',
+    name: mode === 'install' && !preserveNodeNames ? '' : (item.name || ''), protocol: item.protocol || 'vless', port: item.port || '',
     transport: item.transport || '', outbound: item.outbound || '',
     tlsMode: item.tls?.mode || '', serverName: item.tls?.serverName || '',
-    uuid: '', username: item.credentials?.username || '', password: '',
+    uuid: preserveSecrets ? visibleSecret(item.credentials?.uuid) : '', username: item.credentials?.username || '', password: preserveSecrets ? visibleSecret(item.credentials?.password) : '',
     path: item.transportOptions?.path || '',
     host: Object.prototype.hasOwnProperty.call(item.transportOptions || {}, 'host') ? (item.transportOptions.host || '') : (item.tls?.serverName || ''),
     serviceName: item.transportOptions?.serviceName || '',
     certificatePath: item.tls?.certificatePath || '', keyPath: item.tls?.keyPath || '',
-    realityPrivateKey: '', realityPublicKey: item.tls?.realityPublicKey || '', shortId: item.tls?.shortId || '',
+    realityPrivateKey: preserveSecrets ? visibleSecret(item.tls?.realityPrivateKey) : '', realityPublicKey: preserveSecrets ? visibleSecret(item.tls?.realityPublicKey) : '', shortId: item.tls?.shortId || '',
     xhttpMode: item.transportOptions?.xhttpMode || 'auto', xhttpVersion: item.transportOptions?.xhttpVersion || 'auto',
     bandwidthUp: item.transportOptions?.bandwidthUp || '', bandwidthDown: item.transportOptions?.bandwidthDown || '',
-    udpHopPorts: item.transportOptions?.udpHopPorts || '', udpHopInterval: item.transportOptions?.udpHopInterval || '', edgeMode: item.edgeMode || 'direct'
+    udpHopPorts: item.transportOptions?.udpHopPorts || '', udpHopInterval: item.transportOptions?.udpHopInterval || '', edgeMode: item.edgeMode || 'direct',
+    chainSourceType: item.chain?.source?.type || 'deployment',
+    chainGroupId: ['deployment', 'subscription'].includes(item.chain?.source?.type) ? (item.chain?.source?.sourceId || '') : '',
+    chainSource: item.chain?.source ? clone(item.chain.source) : null,
+    chainPreview: item.chain?.snapshot ? {
+      ...clone(item.chain.snapshot),
+      name: item.chain.snapshot.name || item.chain.source?.label || '',
+      server: item.chain.snapshot.server || '',
+      protocol: item.chain.snapshot.protocol || '',
+      retainedCredentials: item.chain?.retainedCredentials === true
+    } : null
   }));
   form.inbounds.splice(0, form.inbounds.length, ...(hydratedInbounds.length ? hydratedInbounds : [newInbound()]));
   syncSelfSignedTlsServerNames();
   deploymentMode.value = mode;
   targetDeploymentId.value = deployment.id || '';
-  templateSourceId.value = deployment.id || '';
+  templateSourceId.value = selectiveReuse ? '' : (deployment.id || '');
   preparedUpdateTargetId.value = mode === 'update' ? (deployment.id || '') : '';
   templateConfigRevision.value = Number(payload.configRevision || deployment.configRevision || 1);
-  retainedSecrets.value = payload.retainedSecrets === true;
+  retainedSecrets.value = selectiveReuse ? false : payload.retainedSecrets === true;
   runtimeOpen.value = false;
   activeTab.value = 'generator';
+  nextTick(() => {
+    for (const inbound of form.inbounds.filter(item => effective(item, 'outbound') === 'chain')) initializeChainSource(inbound);
+  });
 }
 
 async function loadDeploymentConfig(deployment, mode, useRemote = false, action = 'update') {
@@ -910,6 +1154,100 @@ async function loadDeploymentConfig(deployment, mode, useRemote = false, action 
   } catch (error) {
     toast.showToast(error?.status === 409 ? t('deployments.errors.configRevisionConflict') : t('deployments.errors.loadTemplate'), 'error');
   } finally { loading.value = false; }
+}
+
+function resetReuseOptions() {
+  Object.assign(reuseOptions, DEFAULT_REUSE_OPTIONS);
+}
+
+function setConfigSourceMode(mode) {
+  configSourceMode.value = mode;
+  if (mode === 'manual') {
+    reuseSourceId.value = '';
+    reuseTemplate.value = null;
+    reuseInboundSelections.value = [];
+    reuseInboundSecretMappings.value = [];
+    resetReuseOptions();
+  }
+}
+
+function reuseInboundId(index) {
+  return `inbound-reuse-${Date.now()}-${index + 1}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+async function loadReuseTemplate() {
+  const deployment = reuseEligibleDeployments.value.find(item => item.id === reuseSourceId.value);
+  reuseTemplate.value = null;
+  reuseInboundSelections.value = [];
+  reuseInboundSecretMappings.value = [];
+  if (!deployment) return;
+  reuseLoading.value = true;
+  try {
+    const result = await getDeploymentTemplate(deployment.id);
+    const payload = result.data || {};
+    if (payload.config?.schemaVersion !== 2 || !Array.isArray(payload.config?.inbounds) || !payload.config.inbounds.length) {
+      throw new Error('Template unavailable');
+    }
+    reuseTemplate.value = { ...payload, sourceDeployment: deployment };
+    reuseInboundSelections.value = payload.config.inbounds.slice(0, 20).map((_, index) => index);
+  } catch {
+    reuseSourceId.value = '';
+    toast.showToast(t('deployments.errors.loadReuseTemplate'), 'error');
+  } finally { reuseLoading.value = false; }
+}
+
+function applyReuseTemplate() {
+  const payload = reuseTemplate.value;
+  const source = payload?.sourceDeployment || payload?.deployment;
+  if (!payload || !source) return;
+  const previousGlobal = clone(global);
+  const previousHostname = form.hostname;
+  const previousControlCommand = form.controlCommand;
+  const previousInbounds = clone(form.inbounds);
+  const sourceInbounds = Array.isArray(payload.config?.inbounds) ? payload.config.inbounds : [];
+  const selectedInboundIndexes = reuseOptions.inbounds ? [...reuseInboundSelections.value].sort((a, b) => a - b) : [];
+  const config = buildReusableDeploymentConfig(payload.config || {}, {
+    ...reuseOptions,
+    inboundIndexes: selectedInboundIndexes
+  }, reuseInboundId);
+  reuseInboundSecretMappings.value = config.inbounds.map((item, index) => ({
+    targetId: item.id,
+    sourceIndex: selectedInboundIndexes[index]
+  })).filter(item => Number.isInteger(item.sourceIndex));
+  hydrateDeploymentTemplate({ ...payload, config, deployment: source }, 'install', {
+    preserveNodeNames: reuseOptions.nodeName,
+    selectiveReuse: true,
+    preserveSecrets: reuseOptions.credentials,
+    preserveWarpIdentity: reuseOptions.warpIdentity
+  });
+  if (!reuseOptions.inbounds) {
+    form.inbounds.splice(0, form.inbounds.length, ...previousInbounds);
+    if (reuseOptions.outbound) form.inbounds.forEach((item, index) => { item.outbound = sourceInbounds[index]?.outbound || ''; });
+  }
+  for (const key of ['runtime', 'certificate', 'edge', 'tunnel', 'firewall', 'credentials', 'randomPorts', 'deployment']) {
+    Object.assign(global[key], clone(previousGlobal[key] || {}));
+  }
+  replaceReactive(global.protocolDefaults, previousGlobal.protocolDefaults || {});
+  Object.assign(global.common, clone(previousGlobal.common || {}));
+  if (!reuseOptions.outbound) Object.assign(global.warp, clone(previousGlobal.warp || {}));
+  else if (!reuseOptions.warpIdentity) {
+    global.warp.privateKey = '';
+    global.warp.peerPublicKey = '';
+    global.warp.ipv4 = '';
+    global.warp.ipv6 = '';
+    global.warp.acceptedTerms = false;
+    global.warp.provisioning = config.warp?.provisioning || 'auto';
+  }
+  if (!reuseOptions.subscription) {
+    Object.assign(global.subscriptionServer, clone(previousGlobal.subscriptionServer || {}));
+    form.hostname = previousHostname;
+  }
+  form.controlCommand = previousControlCommand;
+  reuseSourceId.value = source.id;
+  templateSourceId.value = '';
+  form.name = `${String(source.name || '部署').trim()}-副本`.slice(0, 120);
+  retainedSecrets.value = false;
+  toast.showToast(t('deployments.notices.reuseApplied'), 'success');
 }
 
 function requestUpdateConfig(deployment, useRemote = false, action = 'update') {
@@ -987,12 +1325,24 @@ function setDeploymentMode(mode) {
     templateSourceId.value = '';
     templateConfigRevision.value = 0;
     retainedSecrets.value = false;
+    configSourceMode.value = 'manual';
+    reuseSourceId.value = '';
+    reuseTemplate.value = null;
+    reuseInboundSelections.value = [];
+    reuseInboundSecretMappings.value = [];
+    resetReuseOptions();
   } else if (mode === 'uninstall') {
     targetDeploymentId.value = '';
     preparedUpdateTargetId.value = '';
     templateSourceId.value = '';
     templateConfigRevision.value = 0;
     retainedSecrets.value = false;
+    configSourceMode.value = 'manual';
+    reuseSourceId.value = '';
+    reuseTemplate.value = null;
+    reuseInboundSelections.value = [];
+    reuseInboundSecretMappings.value = [];
+    resetReuseOptions();
   } else if (templateSourceId.value) {
     targetDeploymentId.value = templateSourceId.value;
     preparedUpdateTargetId.value = templateSourceId.value;
@@ -1066,11 +1416,22 @@ function sparseInbound(item, index) {
     if (item.udpHopPorts) transportOptions.udpHopPorts = item.udpHopPorts;
     if (item.udpHopInterval !== '') transportOptions.udpHopInterval = Number(item.udpHopInterval);
   }
+  const chain = effective(item, 'outbound') === 'chain' && item.chainSource ? {
+    source: item.chainSourceType === 'url'
+      ? { ...clone(item.chainSource), type: 'url', url: item.chainUrl.trim() }
+      : clone(item.chainSource),
+    ...(item.chainPreview?.retainedCredentials ? { retainedCredentials: true } : {})
+  } : null;
+  if (chain && item.chainPreview && item.chainPreview.credentials) chain.snapshot = clone(item.chainPreview);
+  if (chain && item.chainPreview && !chain.snapshot && item.chainPreview.retainedCredentials) {
+    chain.snapshot = clone(item.chainPreview);
+  }
   return {
     id: item.id || `inbound-${index + 1}`, name: item.name.trim(), protocol: item.protocol, port: item.port === '' || item.port === null ? null : Number(item.port),
     ...(item.transport ? { transport: item.transport } : {}), ...(item.outbound ? { outbound: item.outbound } : {}), edgeMode: item.edgeMode || 'direct',
     ...(Object.keys(credentials).length ? { credentials } : {}), ...(Object.keys(tls).length ? { tls } : {}),
-    ...(Object.keys(transportOptions).length ? { transportOptions } : {})
+    ...(Object.keys(transportOptions).length ? { transportOptions } : {}),
+    ...(chain ? { chain } : {})
   };
 }
 
@@ -1115,6 +1476,7 @@ function validateForm() {
     if (inbound.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().length > 80) return t('deployments.errors.nodeNameTooLong');
     if (inbound.uuid && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(inbound.uuid)) return t('deployments.errors.protocolUuidInvalid', { protocol: protocolInfo(inbound.protocol).label });
     if (inbound.tlsMode && !tlsOptions(inbound).includes(inbound.tlsMode)) return t('deployments.errors.protocolTlsUnsupported', { protocol: protocolInfo(inbound.protocol).label });
+    if (effective(inbound, 'outbound') === 'chain' && (!inbound.chainSource || !inbound.chainPreview)) return t('deployments.chain.sourceRequired');
   }
   if (compatibilityErrors.value.length) return compatibilityErrors.value[0];
   if (needsWarp.value && global.warp.provisioning === 'auto' && !global.warp.acceptedTerms) return t('deployments.errors.warpTerms');
@@ -1136,6 +1498,7 @@ function validateForm() {
 }
 
 function requestInstallCommand() {
+  clearCommandResult();
   if (deploymentMode.value === 'uninstall') {
     if (!targetDeployment.value) return toast.showToast(t('deployments.errors.selectTarget'), 'warning');
     return generateActionCommand(targetDeployment.value, 'uninstall');
@@ -1147,11 +1510,13 @@ function requestInstallCommand() {
     if ([t('deployments.errors.controlCommandInvalid'), t('deployments.errors.randomPortRange'), t('deployments.errors.pinnedVersion')].includes(error)) runtimeOpen.value = true;
     const invalidInbound = form.inbounds.find(item => (item.uuid && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item.uuid)) || (item.tlsMode && !tlsOptions(item).includes(item.tlsMode)));
     if (invalidInbound) invalidInbound.expanded = true;
+    commandError.value = { message: error };
     return toast.showToast(error, 'warning');
   }
   showRiskDialog.value = true;
 }
 async function generateInstallCommand() {
+  clearCommandResult();
   showRiskDialog.value = false; loading.value = true;
   try {
     const defaults = serializeGlobal();
@@ -1172,31 +1537,39 @@ async function generateInstallCommand() {
         await openOperationsModal(deployments.value.find(item => item.id === preparedUpdateTargetId.value) || { id: preparedUpdateTargetId.value, name: form.name });
         return;
       }
+      assertDeploymentCommandResult(result);
       toast.showToast(t(reinstallMode.value ? 'deployments.notices.reinstallCommandGenerated' : 'deployments.notices.updateCommandGenerated'), 'success');
     } else {
+      const reuseEncryptedValues = reuseSourceId.value && (reuseOptions.credentials || reuseOptions.warpIdentity || reuseOptions.subscription || reuseOptions.chainUpstream);
       result = await createDeployment({
         name: form.name.trim(), nodeGroup: defaults.deployment?.nodeGroup || '', profileId: defaults.deployment?.profileId || '', config: buildConfig(defaults), outputLanguage: locale.value,
-        ...(templateSourceId.value ? {
+        ...(reuseEncryptedValues ? {
+          cloneFromDeploymentId: reuseSourceId.value,
+          configRevision: templateConfigRevision.value,
+          selectiveCloneOptions: {
+            credentials: reuseOptions.credentials,
+            warpIdentity: reuseOptions.warpIdentity,
+            subscription: reuseOptions.subscription,
+            chainUpstream: reuseOptions.chainUpstream,
+            inboundIndexes: reuseOptions.inbounds ? [...reuseInboundSelections.value].sort((a, b) => a - b) : [],
+            inboundMappings: reuseInboundSecretMappings.value
+          }
+        } : {}),
+        ...(templateSourceId.value && !reuseSourceId.value ? {
           cloneFromDeploymentId: templateSourceId.value,
           configRevision: templateConfigRevision.value,
           resetInheritedNodeNames: true
         } : {})
       });
-      selectedDeploymentId.value = result.data.deployment.id;
+      assertDeploymentCommandResult(result);
+      selectedDeploymentId.value = result.data.deployment?.id || '';
       toast.showToast(t('deployments.notices.commandGenerated'), 'success');
     }
     setCommand(result);
     await scrollToGeneratedCommand();
     await refreshDeployments();
   } catch (error) {
-    const fallback = remoteUpdate.value ? t('deployments.remote.failed') : t('deployments.errors.generateCommand');
-    const serviceCode = error?.data?.error || error?.data?.message || '';
-    const serviceMessage = serviceCode === 'invalid_cloudflare_edge_credentials' || String(serviceCode).startsWith('cloudflare_edge_')
-      ? edgePermissionErrorText(serviceCode)
-      : '';
-    toast.showToast(error?.status === 409 && (!remoteUpdate.value || error?.data?.error === 'REVISION_CONFLICT')
-      ? t('deployments.errors.configRevisionConflict')
-      : (serviceMessage || error?.data?.message || fallback), 'error');
+    reportCommandError(error);
   }
   finally { loading.value = false; }
 }
@@ -1263,6 +1636,7 @@ function closeOperationsModal() {
   clearTimeout(operationsRefreshTimer);
 }
 function assignCommand(target, result) {
+  assertDeploymentCommandResult(result);
   target.curl = result.data.command;
   target.wget = result.data.wgetCommand;
   target.diagnosticCurl = result.data.diagnosticCommand || '';
@@ -1286,6 +1660,7 @@ async function scrollToGeneratedCommand() {
   }
 }
 async function executeActionCommand(deployment, action) {
+  clearCommandResult();
   loading.value = true;
   try {
     const result = await createDeploymentCommand(deployment.id, action, { outputLanguage: locale.value });
@@ -1297,10 +1672,11 @@ async function executeActionCommand(deployment, action) {
     toast.showToast(t('deployments.notices.operationCommandGenerated'), 'success');
     if (action === 'uninstall') await refreshDeployments();
   }
-  catch { toast.showToast(t('deployments.errors.generateCommand'), 'error'); }
+  catch (error) { reportCommandError(error); }
   finally { loading.value = false; }
 }
 async function generateDirectConfigCommand(deployment, action) {
+  clearCommandResult();
   loading.value = true;
   try {
     const result = await createDeploymentCommand(deployment.id, action, { outputLanguage: locale.value });
@@ -1312,10 +1688,11 @@ async function generateDirectConfigCommand(deployment, action) {
     await refreshDeployments({ silent: true });
     toast.showToast(t('deployments.notices.operationCommandGenerated'), 'success');
   } catch (error) {
-    toast.showToast(error?.data?.message || t('deployments.errors.generateCommand'), 'error');
+    reportCommandError(error);
   } finally { loading.value = false; }
 }
 async function generateDirectPendingCommand() {
+  clearCommandResult();
   const deployment = pendingTemplateRecord.value;
   const action = pendingTemplateAction.value;
   const useRemote = pendingTemplateRemote.value;
@@ -1335,7 +1712,7 @@ async function generateDirectPendingCommand() {
     await refreshDeployments({ silent: true });
     await openOperationsModal(deployment);
   } catch (error) {
-    toast.showToast(error?.data?.message || t('deployments.remote.failed'), 'error');
+    reportCommandError(error);
   } finally { loading.value = false; }
 }
 function cancelOperationCommand() { pendingOperation.value = null; }
@@ -1354,6 +1731,7 @@ function closeOperationCommandModal() {
   Object.assign(operationOutput, { curl: '', wget: '', diagnosticCurl: '', diagnosticWget: '', expiresAt: '', client: 'wget', diagnostic: false, deploymentName: '', action: '' });
 }
 async function generateRemoteCommand(deployment, action) {
+  clearCommandResult();
   remoteMenuId.value = '';
   if (!capabilities.value.features.remoteCommands) return toast.showToast(t('deployments.remote.requiresD1'), 'warning');
   if (!deployment.agent?.online) return toast.showToast(t('deployments.remote.offline'), 'warning');
@@ -1366,7 +1744,7 @@ async function generateRemoteCommand(deployment, action) {
     await createRemoteDeploymentCommand(deployment.id, action, { outputLanguage: locale.value });
     toast.showToast(t('deployments.remote.queued'), 'success');
     await refreshDeployments();
-  } catch (error) { toast.showToast(error?.data?.message || t('deployments.remote.failed'), 'error'); await refreshDeployments(); }
+  } catch (error) { reportCommandError(error); await refreshDeployments(); }
   finally { loading.value = false; }
 }
 
@@ -1520,6 +1898,13 @@ onBeforeUnmount(() => {
       <button v-for="tab in tabs" :key="tab.id" type="button" class="min-h-10 shrink-0 border px-4 text-sm font-semibold transition-colors" :class="activeTab === tab.id ? 'border-primary-200 bg-primary-50 text-primary-700 hover:border-primary-300 hover:bg-primary-100 dark:border-primary-500/30 dark:bg-primary-500/10 dark:text-primary-300 dark:hover:bg-primary-500/20' : 'border-transparent text-gray-500 hover:border-gray-200 hover:bg-gray-50 hover:text-gray-800 dark:hover:border-white/10 dark:hover:bg-white/5 dark:hover:text-gray-200'" @click="switchTab(tab.id)">{{ tab.label }}</button>
     </div>
 
+    <section v-if="commandError" ref="commandErrorRef" role="alert" data-testid="deployment-command-error" class="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-200">
+      <h2 class="font-semibold">{{ t('deployments.errors.generateCommand') }}</h2>
+      <p class="mt-2 break-words">{{ commandError.message }}</p>
+      <p v-if="commandError.status || commandError.code" class="mt-2 break-all font-mono text-xs">{{ commandError.status ? `HTTP ${commandError.status}` : '' }} {{ commandError.code }}</p>
+      <p v-if="commandError.requestId" class="mt-1 break-all font-mono text-xs">{{ t('deployments.commandErrors.requestId') }}: {{ commandError.requestId }}</p>
+    </section>
+
     <template v-if="activeTab === 'generator'">
       <section class="grid gap-3 sm:gap-4 xl:gap-5" :class="remoteUpdate ? 'xl:grid-cols-1' : 'xl:grid-cols-[minmax(0,1fr)_360px]'">
         <form class="deployment-form flex min-w-0 flex-col gap-3 sm:gap-4 xl:gap-5" @submit.prevent="requestInstallCommand">
@@ -1560,6 +1945,57 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <section v-if="deploymentMode === 'install'" data-testid="deployment-config-source" class="deployment-surface order-3 overflow-hidden">
+            <div class="space-y-3 p-3 sm:p-4">
+              <div>
+                <h2 class="text-sm font-semibold">{{ t('deployments.source.title') }}</h2>
+                <p class="mt-1 text-xs leading-5 text-gray-500">{{ t('deployments.source.hint') }}</p>
+              </div>
+              <div class="grid grid-cols-2 gap-1.5 sm:max-w-lg sm:gap-2" role="radiogroup" :aria-label="t('deployments.source.title')">
+                <button type="button" data-testid="deployment-source-manual" class="min-h-10 border px-3 text-sm font-medium" :class="configSourceMode === 'manual' ? 'border-primary-300 bg-primary-50 text-primary-700 dark:border-primary-400/40 dark:bg-primary-500/15 dark:text-primary-200' : 'deploy-btn-neutral'" :aria-pressed="configSourceMode === 'manual'" @click="setConfigSourceMode('manual')">{{ t('deployments.source.manual') }}</button>
+                <button type="button" data-testid="deployment-source-reuse" class="min-h-10 border px-3 text-sm font-medium" :class="configSourceMode === 'reuse' ? 'border-primary-300 bg-primary-50 text-primary-700 dark:border-primary-400/40 dark:bg-primary-500/15 dark:text-primary-200' : 'deploy-btn-neutral'" :aria-pressed="configSourceMode === 'reuse'" @click="setConfigSourceMode('reuse')">{{ t('deployments.source.reuse') }}</button>
+              </div>
+              <template v-if="configSourceMode === 'reuse'">
+                <label class="block text-sm font-medium">
+                  {{ t('deployments.source.select') }}
+                  <DeploymentSelectShell><select v-model="reuseSourceId" data-testid="deployment-reuse-source" class="w-full border bg-transparent px-3 py-2.5" @change="loadReuseTemplate">
+                    <option value="">{{ t('deployments.pleaseSelect') }}</option>
+                    <option v-for="deployment in reuseEligibleDeployments" :key="deployment.id" :value="deployment.id">{{ deployment.name }}</option>
+                  </select></DeploymentSelectShell>
+                </label>
+                <div v-if="reuseLoading" class="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800 dark:border-sky-400/25 dark:bg-sky-500/10 dark:text-sky-200">{{ t('deployments.source.loading') }}</div>
+                <div v-else-if="reuseSummary" data-testid="deployment-reuse-summary" class="rounded-lg border border-sky-200 bg-sky-50/70 p-3 text-xs leading-5 text-sky-900 dark:border-sky-400/25 dark:bg-sky-500/10 dark:text-sky-100">
+                  <p class="font-semibold">{{ reuseTemplate.sourceDeployment?.name || reuseTemplate.deployment?.name }}</p>
+                  <p>{{ t('deployments.source.summary', { version: reuseSummary.schemaVersion, count: reuseSummary.inboundCount, protocols: reuseSummary.protocols.join('、') || '-', outbounds: reuseSummary.outbounds.join('、') || '-', core: reuseSummary.core || '-' }) }}</p>
+                  <p v-if="reuseSummary.updatedAt">{{ t('deployments.source.lastUpdated', { time: formatDate(reuseSummary.updatedAt) }) }}</p>
+                </div>
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.inbounds" data-testid="reuse-option-inbounds" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseInbounds') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.tls" data-testid="reuse-option-tls" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseTls') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.outbound" data-testid="reuse-option-outbound" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseOutbound') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.ports" data-testid="reuse-option-ports" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reusePorts') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.credentials" data-testid="reuse-option-credentials" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseCredentials') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.warpIdentity" data-testid="reuse-option-warp" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseWarp') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.subscription" data-testid="reuse-option-subscription" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseSubscription') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.chainUpstream" data-testid="reuse-option-chain" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseChainUpstream') }}</label>
+                  <label class="flex items-start gap-2 text-xs"><input v-model="reuseOptions.nodeName" data-testid="reuse-option-node-name" type="checkbox" class="mt-0.5" />{{ t('deployments.source.reuseNodeName') }}</label>
+                </div>
+                <fieldset v-if="reuseOptions.inbounds && reuseInboundChoices.length" data-testid="deployment-reuse-inbound-choices" class="rounded-lg border border-gray-200 p-3 dark:border-white/10">
+                  <legend class="px-1 text-xs font-semibold">{{ t('deployments.source.selectInbounds') }}</legend>
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <label v-for="choice in reuseInboundChoices" :key="choice.index" class="flex min-w-0 items-start gap-2 text-xs">
+                      <input v-model="reuseInboundSelections" :data-testid="`reuse-inbound-choice-${choice.index}`" type="checkbox" :value="choice.index" class="mt-0.5 shrink-0" />
+                      <span class="min-w-0"><strong>{{ choice.protocol }}</strong><span v-if="choice.name"> · {{ choice.name }}</span><span v-if="choice.port"> · :{{ choice.port }}</span></span>
+                    </label>
+                  </div>
+                  <p v-if="!reuseInboundSelections.length" class="mt-2 text-xs text-red-600 dark:text-red-300">{{ t('deployments.source.selectInboundRequired') }}</p>
+                </fieldset>
+                <p class="text-xs leading-5 text-gray-500">{{ t('deployments.source.sensitiveHint') }}</p>
+                <button type="button" data-testid="deployment-apply-reuse" class="deploy-btn-primary min-h-10 w-full bg-primary-600 px-4 text-sm font-medium text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50" :disabled="!canApplyReuse" @click="applyReuseTemplate">{{ t('deployments.source.apply') }}</button>
+              </template>
+            </div>
+          </section>
+
           <section data-testid="deployment-global-settings" class="deployment-surface order-4 overflow-hidden">
             <div class="space-y-3 p-3 sm:p-4">
               <h2 class="text-sm font-semibold">{{ t('deployments.globalConfig') }}</h2>
@@ -1576,7 +2012,7 @@ onBeforeUnmount(() => {
               <div data-testid="deployment-shared-options" class="grid grid-cols-6 gap-2.5 sm:gap-3 lg:grid-cols-5">
                 <div class="col-span-2 min-w-0 text-sm lg:col-span-1"><DeploymentHelpLabel for-id="global-shared-transport" :label="t('deployments.fields.sharedTransport')" :help="t('deployments.help.sharedTransport')" :open="deploymentInfoPopoverKey === generatorHelpKey('shared-transport')" test-id="shared-transport-help" @update:open="value => setDeploymentInfoPopover(generatorHelpKey('shared-transport'), value)" /><DeploymentSelectShell test-id="global-shared-transport-shell"><select id="global-shared-transport" v-model="global.common.transport" data-testid="global-shared-transport" class="w-full border bg-transparent px-2 py-2"><option value="">{{ t('deployments.options.protocolDefault') }}</option><option v-for="([value,label]) in TRANSPORT_OPTIONS" :key="value" :value="value">{{ label }}</option></select></DeploymentSelectShell><p v-if="sharedTransportScope" data-testid="shared-transport-scope" class="mt-1 text-xs leading-5 text-gray-500">{{ sharedTransportScope }}</p></div>
                 <div class="col-span-2 min-w-0 text-sm lg:col-span-1"><DeploymentHelpLabel for-id="global-shared-tls" :label="t('deployments.fields.sharedTls')" :help="t('deployments.help.sharedTls')" :open="deploymentInfoPopoverKey === generatorHelpKey('shared-tls')" test-id="shared-tls-help" @update:open="value => setDeploymentInfoPopover(generatorHelpKey('shared-tls'), value)" /><DeploymentSelectShell test-id="global-shared-tls-shell"><select id="global-shared-tls" v-model="global.common.tlsMode" data-testid="global-shared-tls" class="w-full border bg-transparent px-2 py-2"><option value="">{{ t('deployments.options.protocolDefault') }}</option><option value="none">{{ t('deployments.options.noTls') }}</option><option value="tls">TLS</option><option value="reality">Reality</option></select></DeploymentSelectShell><p v-if="sharedTlsScope" data-testid="shared-tls-scope" class="mt-1 text-xs leading-5 text-gray-500">{{ sharedTlsScope }}</p></div>
-                <div class="col-span-2 min-w-0 text-sm lg:col-span-1"><DeploymentHelpLabel for-id="global-shared-outbound" :label="t('deployments.fields.sharedOutbound')" :help="t('deployments.help.sharedOutbound')" :open="deploymentInfoPopoverKey === generatorHelpKey('shared-outbound')" test-id="shared-outbound-help" @update:open="value => setDeploymentInfoPopover(generatorHelpKey('shared-outbound'), value)" /><DeploymentSelectShell test-id="global-shared-outbound-shell"><select id="global-shared-outbound" v-model="global.common.outbound" data-testid="global-shared-outbound" class="w-full border bg-transparent px-2 py-2"><option value="">{{ t('deployments.options.protocolDefault') }}</option><option v-for="([value,label]) in OUTBOUND_OPTIONS" :key="value" :value="value">{{ label.startsWith('deployments.') ? t(label) : label }}</option></select></DeploymentSelectShell></div>
+                <div class="col-span-2 min-w-0 text-sm lg:col-span-1"><DeploymentHelpLabel for-id="global-shared-outbound" :label="t('deployments.fields.sharedOutbound')" :help="t('deployments.help.sharedOutbound')" :open="deploymentInfoPopoverKey === generatorHelpKey('shared-outbound')" test-id="shared-outbound-help" @update:open="value => setDeploymentInfoPopover(generatorHelpKey('shared-outbound'), value)" /><DeploymentSelectShell test-id="global-shared-outbound-shell"><select id="global-shared-outbound" v-model="global.common.outbound" data-testid="global-shared-outbound" class="w-full border bg-transparent px-2 py-2"><option value="">{{ t('deployments.options.protocolDefault') }}</option><option v-for="([value,label]) in OUTBOUND_OPTIONS" :key="value" :value="value" :disabled="sharedOutboundDisabled(value)">{{ label.startsWith('deployments.') ? t(label) : label }}{{ sharedOutboundDisabled(value) ? ` ${t('deployments.inbounds.unsupportedOutbound')}` : '' }}</option></select></DeploymentSelectShell></div>
                 <div class="col-span-3 min-w-0 text-sm lg:col-span-1"><DeploymentHelpLabel for-id="global-shared-server-name" :label="t('deployments.fields.sharedServerName')" :help="t('deployments.help.sharedServerName')" :open="deploymentInfoPopoverKey === generatorHelpKey('shared-server-name')" test-id="shared-server-name-help" @update:open="value => setDeploymentInfoPopover(generatorHelpKey('shared-server-name'), value)" /><input id="global-shared-server-name" v-model="global.common.serverName" class="mt-1 w-full border bg-transparent px-2 py-2" :placeholder="t('deployments.placeholders.protocolBuiltin')" @input="updateSharedServerName" /></div>
                 <label class="col-span-3 min-w-0 text-sm lg:col-span-1">{{ t('deployments.fields.username') }}<input v-model="global.credentials.username" data-testid="global-username" class="mt-1 w-full border bg-transparent px-2 py-2" /></label>
               </div>
@@ -1663,13 +2099,61 @@ onBeforeUnmount(() => {
               <label class="col-span-2 min-w-0 text-xs text-gray-500 sm:col-span-1 lg:col-span-1" :for="`inbound-port-${index}`">{{ t('deployments.inbounds.port') }}<input :id="`inbound-port-${index}`" v-model="inbound.port" data-testid="inbound-port" inputmode="numeric" class="mt-1 min-h-10 w-full border bg-transparent px-2 text-sm text-gray-900 dark:text-white" :placeholder="t('deployments.placeholders.random')" /></label>
               <label class="col-span-5 min-w-0 text-xs text-gray-500 sm:col-span-4 sm:col-start-3 sm:row-start-1 lg:col-span-1 lg:col-start-auto lg:row-start-auto">{{ t('deployments.inbounds.nodeName') }}<input v-model="inbound.name" data-testid="inbound-node-name" maxlength="80" class="mt-1 min-h-10 w-full border bg-transparent px-2 text-sm text-gray-900 dark:text-white" :placeholder="nodeNamePlaceholder(inbound)" /></label>
               <div class="col-span-2 col-start-1 row-start-3 min-w-0 text-xs text-gray-500 sm:row-start-2 lg:col-span-1 lg:col-start-auto lg:row-start-auto"><DeploymentHelpLabel :for-id="`inbound-transport-${index}`" :label="t('deployments.inbounds.transport')" :help="t('deployments.help.inboundTransport')" :open="deploymentInfoPopoverKey === generatorHelpKey(`inbound-${index}-transport`)" :test-id="`inbound-transport-help-${index}`" @update:open="value => setDeploymentInfoPopover(generatorHelpKey(`inbound-${index}-transport`), value)" /><DeploymentSelectShell v-if="transportConfigurable(inbound)"><select :id="`inbound-transport-${index}`" v-model="inbound.transport" :data-testid="`inbound-transport-${index}`" class="min-h-10 min-w-0 w-full border bg-transparent px-2 text-sm text-gray-900 dark:text-white" @change="updateTransport(inbound)"><option value="">{{ t('deployments.inbounds.inherit', { value: effective(inbound, 'transport') }) }}</option><option v-for="([value,label]) in TRANSPORT_OPTIONS" :key="value" :value="value" :disabled="transportDisabled(inbound, value)">{{ label }}</option></select></DeploymentSelectShell><output v-else :id="`inbound-transport-${index}`" :data-testid="`inbound-transport-${index}`" class="mt-1 flex min-h-10 w-full items-center border bg-gray-50 px-2 text-sm text-gray-700 dark:bg-white/5 dark:text-gray-200">{{ nativeTransportLabel(inbound) }}</output></div>
-              <div class="col-span-2 col-start-3 row-start-3 min-w-0 text-xs text-gray-500 sm:row-start-2 lg:col-span-1 lg:col-start-auto lg:row-start-auto"><DeploymentHelpLabel :for-id="`inbound-outbound-${index}`" :label="t('deployments.inbounds.outbound')" :help="t('deployments.help.inboundOutbound')" :open="deploymentInfoPopoverKey === generatorHelpKey(`inbound-${index}-outbound`)" :test-id="`inbound-outbound-help-${index}`" @update:open="value => setDeploymentInfoPopover(generatorHelpKey(`inbound-${index}-outbound`), value)" /><DeploymentSelectShell><select :id="`inbound-outbound-${index}`" v-model="inbound.outbound" :data-testid="`inbound-outbound-${index}`" class="min-h-10 min-w-0 w-full border bg-transparent px-2 text-sm text-gray-900 dark:text-white" @change="updateOutbound(inbound)"><option value="">{{ t('deployments.inbounds.inherit', { value: effective(inbound, 'outbound') }) }}</option><option v-for="([value,label]) in OUTBOUND_OPTIONS" :key="value" :value="value">{{ label.startsWith('deployments.') ? t(label) : label }}</option></select></DeploymentSelectShell></div>
+              <div class="col-span-2 col-start-3 row-start-3 min-w-0 text-xs text-gray-500 sm:row-start-2 lg:col-span-1 lg:col-start-auto lg:row-start-auto"><DeploymentHelpLabel :for-id="`inbound-outbound-${index}`" :label="t('deployments.inbounds.outbound')" :help="t('deployments.help.inboundOutbound')" :open="deploymentInfoPopoverKey === generatorHelpKey(`inbound-${index}-outbound`)" :test-id="`inbound-outbound-help-${index}`" @update:open="value => setDeploymentInfoPopover(generatorHelpKey(`inbound-${index}-outbound`), value)" /><DeploymentSelectShell><select :id="`inbound-outbound-${index}`" v-model="inbound.outbound" :data-testid="`inbound-outbound-${index}`" class="min-h-10 min-w-0 w-full border bg-transparent px-2 text-sm text-gray-900 dark:text-white" @change="updateOutbound(inbound)"><option value="">{{ t('deployments.inbounds.inherit', { value: effective(inbound, 'outbound') }) }}</option><option v-for="([value,label]) in INBOUND_OUTBOUND_OPTIONS" :key="value" :value="value" :disabled="outboundDisabled(inbound, value)">{{ label.startsWith('deployments.') ? t(label) : label }}{{ outboundDisabled(inbound, value) ? ` ${t('deployments.inbounds.unsupportedOutbound')}` : '' }}</option></select></DeploymentSelectShell></div>
               <div class="contents sm:hidden" data-testid="inbound-mobile-actions">
                 <button type="button" :data-testid="`inbound-more-mobile-${index}`" class="deploy-btn-neutral col-start-5 row-start-3 flex min-h-10 w-fit justify-self-end items-center justify-center gap-0.5 whitespace-nowrap border px-2 text-sm" :aria-expanded="inbound.expanded" @click="inbound.expanded = !inbound.expanded"><span>{{ t('deployments.inbounds.advanced') }}</span><svg :data-testid="`inbound-more-icon-mobile-${index}`" aria-hidden="true" class="h-4 w-4 shrink-0 transition-transform" :class="inbound.expanded ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6" /></svg></button>
                 <button type="button" :data-testid="`inbound-delete-mobile-${index}`" class="deploy-btn-danger col-start-5 row-start-1 flex min-h-10 min-w-[3.75rem] justify-self-end items-center justify-center whitespace-nowrap border border-red-200 px-3 text-sm font-medium text-red-600 disabled:cursor-not-allowed disabled:opacity-30" :disabled="form.inbounds.length === 1" :title="t('deployments.inbounds.delete')" :aria-label="t('deployments.inbounds.delete')" @click="removeInbound(index)">{{ t('actions.delete') }}</button>
               </div>
               <button type="button" :data-testid="`inbound-more-${index}`" class="deploy-btn-neutral hidden min-h-10 w-fit shrink-0 justify-self-end items-center justify-center gap-0.5 whitespace-nowrap border px-2 text-sm sm:col-start-5 sm:row-start-2 sm:flex lg:col-start-auto lg:row-start-auto" :aria-expanded="inbound.expanded" @click="inbound.expanded = !inbound.expanded"><span>{{ t('deployments.inbounds.advanced') }}</span><svg :data-testid="`inbound-more-icon-${index}`" aria-hidden="true" class="h-4 w-4 shrink-0 transition-transform" :class="inbound.expanded ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6" /></svg></button>
               <button type="button" :data-testid="`inbound-delete-${index}`" class="deploy-btn-danger hidden min-h-10 w-fit shrink-0 justify-self-end whitespace-nowrap border border-red-200 px-2 text-sm font-medium text-red-600 disabled:cursor-not-allowed disabled:opacity-30 sm:col-start-6 sm:row-start-2 sm:block lg:col-start-auto lg:row-start-auto" :disabled="form.inbounds.length === 1" :title="t('deployments.inbounds.delete')" :aria-label="t('deployments.inbounds.delete')" @click="removeInbound(index)">{{ t('actions.delete') }}</button>
+            </div>
+            <div v-if="effective(inbound, 'outbound') === 'chain'" :data-testid="`inbound-chain-${index}`" :aria-busy="inbound.chainLoading ? 'true' : 'false'" class="border-t bg-slate-50/70 p-3 dark:border-white/10 dark:bg-white/[0.03] sm:p-4">
+              <div class="mb-3 border-b border-slate-200 pb-3 dark:border-white/10">
+                <h4 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('deployments.chain.title') }}</h4>
+                <p class="mt-1 text-xs leading-5 text-amber-700 dark:text-amber-300">{{ t('deployments.chain.failClosedHint') }}</p>
+              </div>
+              <div class="grid gap-3 sm:grid-cols-2">
+                <label class="text-xs text-gray-500">{{ t('deployments.chain.sourceType') }}
+                  <DeploymentSelectShell><select v-model="inbound.chainSourceType" :data-testid="`chain-source-type-${index}`" class="min-h-10 w-full border bg-transparent px-2 text-sm text-gray-900 dark:text-white" @change="setChainSourceType(inbound)"><option v-for="type in CHAIN_SOURCE_TYPES" :key="type" :value="type">{{ t(`deployments.chain.sources.${type}`) }}</option></select></DeploymentSelectShell>
+                </label>
+                <label v-if="groupedChainSource(inbound.chainSourceType)" class="text-xs text-gray-500">{{ t(inbound.chainSourceType === 'deployment' ? 'deployments.chain.selectDeployment' : 'deployments.chain.selectSubscription') }}
+                  <DeploymentSelectShell><select v-model="inbound.chainGroupId" :data-testid="`chain-group-${index}`" class="min-h-10 w-full border bg-transparent px-2 text-sm text-gray-900 dark:text-white" :disabled="inbound.chainLoading" @change="setChainGroup(inbound)"><option value="">{{ t(inbound.chainSourceType === 'deployment' ? 'deployments.chain.deploymentRequired' : 'deployments.chain.subscriptionRequired') }}</option><option v-for="group in inbound.chainGroups" :key="group.sourceId" :value="group.sourceId">{{ group.name }} · {{ t('deployments.nodeCount', { count: group.nodeCount }) }} · {{ (group.protocols || []).map(value => value.toUpperCase()).join('/') || '-' }}</option></select></DeploymentSelectShell>
+                </label>
+              </div>
+              <div v-if="inbound.chainLoading && groupedChainSource(inbound.chainSourceType) && !inbound.chainGroupId" class="mt-3 flex items-center gap-2 text-xs text-gray-500" role="status" aria-live="polite"><span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary-500 border-t-transparent" aria-hidden="true"></span>{{ t('deployments.chain.loadingSources') }}</div>
+              <p v-else-if="inbound.chainLoadError === 'groups'" class="mt-3 text-xs text-red-600 dark:text-red-300">{{ t('deployments.chain.loadSourcesFailed') }}</p>
+              <p v-else-if="!inbound.chainLoading && groupedChainSource(inbound.chainSourceType) && !inbound.chainGroups.length" class="mt-3 text-xs text-gray-500">{{ t(inbound.chainSourceType === 'subscription' ? 'deployments.chain.noSubscriptionSources' : 'deployments.chain.noSources') }}</p>
+              <button v-if="groupedChainSource(inbound.chainSourceType) && inbound.chainLoadError === 'groups'" type="button" class="deploy-btn-neutral mt-2 min-h-9 border px-3 text-xs" :disabled="inbound.chainLoading" @click="loadChainGroups(inbound)">{{ t('actions.refresh') }}</button>
+              <button v-if="groupedChainSource(inbound.chainSourceType) && inbound.chainGroupPage < inbound.chainGroupTotalPages" type="button" class="deploy-btn-neutral mt-2 min-h-9 border px-3 text-xs" :disabled="inbound.chainLoading" @click="loadChainGroups(inbound, true)">{{ t('deployments.chain.loadMoreSources') }}</button>
+              <div v-if="inbound.chainSourceType !== 'url'" class="mt-3 space-y-3">
+                <div v-if="!groupedChainSource(inbound.chainSourceType) || inbound.chainGroupId" class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_160px_auto]">
+                  <input v-model="inbound.chainSearch" :data-testid="`chain-search-${index}`" :disabled="inbound.chainLoading" class="min-h-10 w-full border bg-transparent px-3 text-sm disabled:opacity-60" :placeholder="t('deployments.chain.search')" @keyup.enter="loadChainSources(inbound)" />
+                  <DeploymentSelectShell><select v-model="inbound.chainProtocol" :disabled="inbound.chainLoading" class="min-h-10 w-full border bg-transparent px-2 text-sm disabled:opacity-60" @change="loadChainSources(inbound)"><option value="">{{ t('deployments.chain.allProtocols') }}</option><option v-for="protocol in Object.keys(CHAIN_PROTOCOL_CORES)" :key="protocol" :value="protocol">{{ protocol.toUpperCase() }}</option></select></DeploymentSelectShell>
+                  <button type="button" class="deploy-btn-neutral min-h-10 border px-4 text-sm" :disabled="inbound.chainLoading" @click="loadChainSources(inbound)">{{ t('actions.refresh') }}</button>
+                </div>
+                <div v-if="inbound.chainLoading && (!groupedChainSource(inbound.chainSourceType) || inbound.chainGroupId)" class="flex items-center gap-2 text-xs text-gray-500" role="status" aria-live="polite"><span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary-500 border-t-transparent" aria-hidden="true"></span>{{ t('deployments.chain.loadingNodes') }}</div>
+                <p v-else-if="inbound.chainLoadError === 'nodes'" class="text-xs text-red-600 dark:text-red-300">{{ t('deployments.chain.loadNodesFailed') }}</p>
+                <p v-else-if="groupedChainSource(inbound.chainSourceType) && !inbound.chainGroupId" class="text-xs text-gray-500">{{ t(inbound.chainSourceType === 'deployment' ? 'deployments.chain.deploymentRequired' : 'deployments.chain.subscriptionRequired') }}</p>
+                <div v-else-if="inbound.chainSources.length" class="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  <button v-for="item in inbound.chainSources" :key="item.key" type="button" :data-testid="`chain-source-item-${index}`" class="rounded-lg border p-3 text-left text-xs transition" :class="inbound.chainSource?.key === item.key ? 'border-primary-500 bg-primary-50 dark:bg-primary-500/10' : 'border-gray-200 bg-white hover:border-primary-300 dark:border-white/10 dark:bg-white/5'" @click="selectChainSource(inbound, item)">
+                    <span class="block truncate text-sm font-semibold text-gray-900 dark:text-white">{{ item.name }}</span>
+                    <span class="mt-1 block truncate text-gray-500">{{ item.protocol.toUpperCase() }} · {{ item.address }}:{{ item.port }} · {{ item.transport }}</span>
+                    <span class="mt-1 inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600 dark:bg-white/10 dark:text-gray-300">{{ t(`deployments.chain.routes.${item.routeType}`) }}</span>
+                  </button>
+                </div>
+                <p v-else-if="!inbound.chainLoading && (!groupedChainSource(inbound.chainSourceType) || inbound.chainGroupId)" class="text-xs text-gray-500">{{ inbound.chainSourceType === 'subscription' ? t('deployments.chain.subscriptionEmpty') : t('deployments.chain.empty') }}</p>
+                <button v-if="inbound.chainPage < inbound.chainTotalPages" type="button" class="deploy-btn-neutral min-h-9 border px-3 text-xs" :disabled="inbound.chainLoading" @click="loadChainSources(inbound, true)">{{ t('deployments.chain.loadMore') }}</button>
+              </div>
+              <div v-else class="mt-3 flex flex-col gap-2 sm:flex-row">
+                <input v-model="inbound.chainUrl" :data-testid="`chain-url-${index}`" class="min-h-10 min-w-0 flex-1 border bg-transparent px-3 font-mono text-xs" :placeholder="t('deployments.chain.urlPlaceholder')" />
+                <button type="button" :data-testid="`chain-preview-${index}`" class="deploy-btn-primary min-h-10 bg-primary-600 px-4 text-sm font-medium text-white" :disabled="inbound.chainLoading" @click="previewChainUrl(inbound)">{{ t('deployments.chain.preview') }}</button>
+              </div>
+              <div v-if="inbound.chainPreview" class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200">
+                <p class="font-semibold">{{ inbound.chainPreview.name || inbound.chainSource?.label }} · {{ String(inbound.chainPreview.protocol || '').toUpperCase() }}</p>
+                <p class="mt-1">{{ inbound.chainPreview.server }}:{{ inbound.chainPreview.port }} · {{ inbound.chainPreview.transport?.type || 'tcp' }}</p>
+              </div>
+              <p v-if="inbound.chainSourceMissing" class="mt-3 text-xs leading-5 text-red-600 dark:text-red-300">{{ t('deployments.chain.sourceMissing') }}</p>
+              <div class="mt-3 space-y-1 text-xs leading-5 text-amber-700 dark:text-amber-300"><p>{{ t('deployments.chain.snapshotHint') }}</p><p>{{ t('deployments.chain.savedRecordHint') }}</p></div>
             </div>
             <p v-if="inboundCompatibilityError(inbound)" class="border-t border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300">{{ inboundCompatibilityError(inbound) }}</p>
             <div v-if="inbound.expanded" :data-testid="`inbound-advanced-${index}`" class="grid grid-cols-2 gap-2.5 border-t p-3 sm:gap-3 lg:grid-cols-4 lg:p-4 dark:border-white/10">

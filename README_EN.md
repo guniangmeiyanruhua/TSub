@@ -9,7 +9,7 @@
   <a href="#deployment-guide"><img src="https://img.shields.io/badge/deploy-Cloudflare%20Pages-f38020.svg" alt="Cloudflare Pages"></a>
   <a href="docs/SERVER_DEPLOYMENT_EN.md#docker-compose"><img src="https://img.shields.io/badge/deploy-Docker%20Compose-2496ed.svg" alt="Docker Compose"></a>
   <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Vue-3.x-42b883.svg" alt="Vue 3.x"></a>
-  <a href="#release-notes"><img src="https://img.shields.io/badge/TSub-v1.0.13-2563eb.svg" alt="TSub v1.0.13"></a>
+  <a href="#release-notes"><img src="https://img.shields.io/badge/TSub-v1.0.18-2563eb.svg" alt="TSub v1.0.18"></a>
 </p>
 
 TSub is a subscription and proxy-node management platform for Cloudflare Pages or a self-hosted server. It includes Profiles, conversion, proxy deployment, remote agents, local execution, notifications, backups, and an external management API.
@@ -24,6 +24,7 @@ TSub is a subscription and proxy-node management platform for Cloudflare Pages o
 - Produce Base64, Clash/Mihomo, sing-box, Surge, Loon, and Quantumult X output.
 - Build subscriptions with operator chains, rule templates, filtering, sorting, deduplication, and renaming.
 - Deploy Xray or sing-box to low-memory servers with TSub Proxy, without storing SSH credentials.
+- Assign one single-hop chain upstream per inbound from an existing deployment, subscription node, manual node, or pasted link; upstream failure never falls back to the entry server's direct egress.
 - Synchronize nodes and aggregate traffic through one-time Bootstrap tokens, encrypted deployment configuration, active push, and HTTPS mirrors.
 - Use Cloudflare KV basic mode or D1 full mode; self-host with single-instance SQLite WAL or multi-instance PostgreSQL.
 - Use the Chinese/English responsive interface and fully isolated read-only demo data.
@@ -69,6 +70,22 @@ After the first sign-in, before generating a proxy deployment command, open the 
 
 The server controller supports Docker Compose and bare-metal Debian, Ubuntu, or Alpine. Its web process is unprivileged and delegates host changes to a separate root executor. Node installers first probe the controller, then use the AWS Global API (`https://checkip.global.api.aws`) and Akamai (`https://whatismyip.akamai.com`) as IPv4/IPv6 fallbacks. These report egress IPs, so confirm the reachable address manually behind NAT or proxies. See [Server Controller Deployment](docs/SERVER_DEPLOYMENT_EN.md) and [Architecture](docs/ARCHITECTURE_EN.md).
 
+#### Troubleshooting command generation
+
+Command failures remain visible with a message, HTTP status, error code and request ID. A new attempt clears the old command. Failures while running an already generated command on a server belong to its operation records.
+
+| Code / symptom | Resolution |
+| --- | --- |
+| `DEPLOYMENT_KEY_MISSING` / `DEPLOYMENT_KEY_INVALID` | Set an independent random `DEPLOYMENT_SECRET_KEY` Secret of at least 16 characters in the current Pages environment and redeploy. Successful sign-in does not confirm this key is configured. |
+| `DEPLOYMENT_DECRYPT_FAILED` | Restore the original key used to save the deployment. Do not replace it randomly or delete the deployment to retry. |
+| `DEPLOYMENT_ASSET_OVERRIDE_INCOMPLETE` / `DEPLOYMENT_ASSET_INVALID` | Remove the entire custom override group to use built-in assets, or complete its version, both architecture HTTPS URLs, SHA-256 checksums, formats and required extracted binary hashes, then redeploy. |
+| `DEPLOYMENT_PINNED_MANIFEST_INVALID` / `DEPLOYMENT_PINNED_ASSET_MISSING` | Correct the pinned manifest or use the `stable` channel. |
+| `DEPLOYMENT_STORAGE_UNAVAILABLE` | Check current-environment `TSUB_DB` / `TSUB_KV` bindings, storage mode and initialization. |
+| Network interruption, timeout or `DEPLOYMENT_COMMAND_FAILED` | Refresh deployment and operation records to check whether the request was saved before retrying. Keep the request ID to correlate sanitized logs. |
+| Legacy HTTP 503 / `Internal Server Error` | Older APIs hide the cause; 503 alone cannot identify the missing setting. Check the deployment key and asset overrides, and update the controller to obtain a specific error code. |
+
+Diagnostics do not expose key values, installation tokens or raw internal exceptions. Keep credentials out of screenshots.
+
 ### Deployment Method 2: Docker Compose
 
 Use Docker Engine and Compose v2 on Linux `amd64` or `arm64`. Initialize `.env` with `TSUB_DOMAIN`, administrator credentials, and independent encryption Secrets, then run `docker compose config` and `docker compose up -d --build`. Compose runs the controller as an unprivileged container, uses Caddy for HTTPS, persists SQLite and Caddy data in named volumes, and exposes only ports 80/443. Port 8787 remains internal.
@@ -77,9 +94,15 @@ Use Docker Engine and Compose v2 on Linux `amd64` or `arm64`. Initialize `.env` 
 
 Install Node.js 22, npm, Git, and the platform service manager, then run `scripts/install-controller.sh`. The installer creates the restricted `tsub-controller` user and registers systemd or OpenRC services. Configure Caddy or Nginx to proxy HTTPS to `127.0.0.1:8787`; PostgreSQL is optional for multi-instance deployments. See the [full server deployment reference](docs/SERVER_DEPLOYMENT_EN.md) for executor installation and verification commands.
 
+### Single-hop Chain Proxy
+
+Each inbound may select one chain upstream, producing a single-hop path: “Client → TSub entry server → upstream proxy → destination.” The dedicated chain section uses one Source Type selector: deployment nodes first select a deployment, subscription nodes first select a subscription, manual nodes are selected directly, and pasted links are parsed and previewed. Complete credentials remain only in the target deployment's encrypted configuration, while source lists, public templates, logs, and operation history expose redacted summaries.
+
+Both Xray and sing-box support VLESS, VMess, Trojan, Shadowsocks, SOCKS5, HTTP/HTTPS, Hysteria2, and WireGuard upstreams. TUIC, AnyTLS, Naive, and Snell upstreams require sing-box; SSR/SSD are not supported. Automatic core selection intersects the server inbound with upstream-client capabilities. No direct backup route is emitted, so an unavailable upstream fails closed instead of leaking the entry server's egress IP. Source changes are not followed automatically; select the source again and run **Update Configuration**. See the [proxy deployment guide](docs/PROXY_DEPLOYMENT_EN.md#single-hop-chain-proxy) for the compatibility table and troubleshooting.
+
 ### Release Notes
 
-Current version `1.0.13`: deployment JSON endpoints now apply per-endpoint body-size protection without rate-limiting authenticated dashboard operations; Agent heartbeats and callbacks keep separate protection. New TLS/REALITY deployments default to `www.cloudflare.com` for better handshake compatibility on AWS and similar cloud networks; fixes the Agent process continuing to run after uninstall; Update Version reloads the Agent and reports the new Runtime heartbeat immediately; a verified historical Runtime Manifest allows a safe rollback to `1.0.9`; controller mismatches and waiting remote commands are shown explicitly.
+Current version `1.0.18`: fixes sing-box chain Reality outbounds failing core validation because the required uTLS client was missing. Chrome is used by default, and a fingerprint supplied by the upstream node is preserved.
 
 ## Local development
 

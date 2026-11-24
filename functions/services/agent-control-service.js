@@ -1,5 +1,6 @@
 import { createDeploymentRepository } from './deployment-repository.js';
 import { getPlatformCapabilities } from './platform-capabilities.js';
+import { redactSensitiveObject, redactSensitiveText } from '../modules/security-utils.js';
 
 const COMMAND_TTL_MS = 30 * 60 * 1000;
 const LEASE_TTL_MS = 120 * 1000;
@@ -241,7 +242,10 @@ export async function pollAgent(request, env, storage, payload = {}) {
     cloudflaredRssMb: Math.max(0, Number(payload.cloudflaredRssMb || 0) || 0),
     estimatedCoreRssMb: Math.max(0, Number(payload.estimatedCoreRssMb || 0) || 0),
     estimatedCloudflaredRssMb: Math.max(0, Number(payload.estimatedCloudflaredRssMb || 0) || 0),
-    quickTunnelStatus: ['ready', 'pending', 'not-required'].includes(payload.quickTunnelStatus) ? payload.quickTunnelStatus : 'not-required'
+    quickTunnelStatus: ['ready', 'pending', 'not-required'].includes(payload.quickTunnelStatus) ? payload.quickTunnelStatus : 'not-required',
+    chainInboundCount: Math.max(0, Math.min(20, Number(payload.chainInboundCount || 0) || 0)),
+    chainProtocols: String(payload.chainProtocols || '').replace(/[^a-z0-9,-]/gi, '').slice(0, 256),
+    chainSourceTypes: String(payload.chainSourceTypes || '').replace(/[^a-z0-9,-]/gi, '').slice(0, 128)
   };
   const heartbeatData = JSON.stringify(heartbeat);
   const heartbeatChanged = !previous || previous.data !== heartbeatData;
@@ -316,9 +320,9 @@ export async function reportAgentCommand(request, env, storage, commandId, paylo
   const operation = await repository.getOperation(auth.command.operation_id);
   if (!operation) return { error: { status: 404, code: 'operation_not_found' } };
   const event = {
-    at: nowIso(), status, stage: String(payload.stage || auth.command.action).slice(0, 64),
-    message: String(payload.message || '').slice(-500), errorCode: String(payload.errorCode || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64),
-    resources: payload.resources && typeof payload.resources === 'object' ? payload.resources : {}
+    at: nowIso(), status, stage: redactSensitiveText(String(payload.stage || auth.command.action)).slice(0, 64),
+    message: redactSensitiveText(String(payload.message || '')).slice(-500), errorCode: String(payload.errorCode || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64),
+    resources: payload.resources && typeof payload.resources === 'object' ? redactSensitiveObject(payload.resources) : {}
   };
   if (status === 'succeeded' && typeof hooks.beforeSuccess === 'function') {
     try {

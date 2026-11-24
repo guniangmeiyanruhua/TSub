@@ -9,7 +9,7 @@
   <a href="#部署教程"><img src="https://img.shields.io/badge/deploy-Cloudflare%20Pages-f38020.svg" alt="Cloudflare Pages"></a>
   <a href="#服务器部署"><img src="https://img.shields.io/badge/deploy-Docker%20Compose-2496ed.svg" alt="Docker Compose"></a>
   <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Vue-3.x-42b883.svg" alt="Vue 3.x"></a>
-  <a href="#版本更新说明"><img src="https://img.shields.io/badge/TSub-v1.0.13-2563eb.svg" alt="TSub v1.0.13"></a>
+  <a href="#版本更新说明"><img src="https://img.shields.io/badge/TSub-v1.0.18-2563eb.svg" alt="TSub v1.0.18"></a>
 </p>
 
 TSub 是可部署在 Cloudflare Pages 或自有服务器上的订阅与代理节点管理平台，包含订阅管理、节点管理、Profile、多客户端转换、代理部署、远程 Agent、本机执行器、通知、备份和外部管理 API。
@@ -22,6 +22,7 @@ TSub 是可部署在 Cloudflare Pages 或自有服务器上的订阅与代理节
 - 输出 Base64、Clash/Mihomo、sing-box、Surge、Loon、Quantumult X 等格式。
 - 使用操作符链、规则模板、节点筛选、排序、去重和名称处理构建订阅。
 - 使用 TSub Proxy 在低内存服务器部署 Xray 或 sing-box，不保存 SSH 账号或私钥。
+- 每个代理入站可配置单级链式上游，并从已有部署、订阅节点、手动节点或粘贴链接创建加密快照；上游故障时禁止回退直连。
 - 通过一次性 Bootstrap、加密部署配置、主动推送和 HTTPS 镜像同步节点及总流量。
 - Cloudflare 支持 KV 基础模式与 D1 完整模式；服务器支持 SQLite WAL 单机模式与 PostgreSQL 多实例模式。
 - 提供中英文界面、桌面和移动端布局，以及完全隔离的只读演示数据。
@@ -164,6 +165,22 @@ SETTINGS_SECRET_KEY=这里填写随机设置密钥（至少16位）
 
 本 README 即为完整部署教程，其中部署方式一为 Cloudflare Pages；英文入口见 [README_EN.md](README_EN.md)。
 
+#### 安装命令生成失败排查
+
+生成失败时，页面会保留错误说明、HTTP 状态、错误码和请求编号；再次生成会清空旧命令，避免误用。已生成命令的服务器执行失败，请另行查看对应操作记录。
+
+| 错误码 / 现象 | 处理方式 |
+| --- | --- |
+| `DEPLOYMENT_KEY_MISSING` / `DEPLOYMENT_KEY_INVALID` | 在 Pages 当前环境配置至少 16 位的独立随机 `DEPLOYMENT_SECRET_KEY` Secret，然后重新部署。能登录不代表已配置部署加密密钥。 |
+| `DEPLOYMENT_DECRYPT_FAILED` | 恢复保存部署配置时使用的原密钥；不要通过随机更换密钥或删除原部署来重试。 |
+| `DEPLOYMENT_ASSET_OVERRIDE_INCOMPLETE` / `DEPLOYMENT_ASSET_INVALID` | 删除对应核心整组自定义资产覆盖变量，使用内置下载信息；或补齐版本、双架构 HTTPS URL、SHA-256、格式及需要的二进制校验值，然后重新部署。 |
+| `DEPLOYMENT_PINNED_MANIFEST_INVALID` / `DEPLOYMENT_PINNED_ASSET_MISSING` | 修正固定清单或改用 `stable` 通道。 |
+| `DEPLOYMENT_STORAGE_UNAVAILABLE` | 检查当前环境的 `TSUB_DB` / `TSUB_KV` 绑定、存储模式和初始化状态。 |
+| 网络中断、超时或 `DEPLOYMENT_COMMAND_FAILED` | 先刷新部署记录和操作记录，确认请求是否已保存，再重试，避免重复创建；保留请求编号用于关联脱敏日志。 |
+| 旧版仅显示 HTTP 503 / `Internal Server Error` | 旧接口隐藏了原因，不能仅凭 503 判断缺少哪个变量；检查部署密钥和资产覆盖项，更新主控后查看具体错误码。 |
+
+错误提示和日志不会输出密钥值、安装 Token 或底层异常正文。不要将这些敏感值放进报错截图。
+
 ### 部署方式二：Docker Compose
 
 服务器部署运行的是完整的 TSub 主控，适合需要 SQLite/PostgreSQL、远程 Agent 或本机执行器的场景。支持 Docker Compose 和 Debian/Ubuntu/Alpine 裸机安装；Web 主控默认使用非 root 用户运行，root 执行器仅在启用本机代理控制时安装。
@@ -263,9 +280,15 @@ sudo ss -lntp | grep -E ':(80|443|8787)\\b'
 curl -I http://127.0.0.1:8787/login
 ```
 
+### 单级链式代理
+
+每个代理入站可以选择一个链式上游，形成“客户端 → TSub 入口服务器 → 上游代理 → 目标网站”的单级路径。链式代理使用独立标题分区和统一的来源类型下拉框：部署节点先选择部署再展示节点，订阅节点先选择订阅源再展示节点，手动节点直接选择，粘贴链接先解析预览。完整凭据只保存于目标部署的加密配置，来源列表、公开模板、日志和操作记录仅显示脱敏摘要。
+
+Xray 与 sing-box 均支持 VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP/HTTPS、Hysteria2 和 WireGuard 上游；TUIC、AnyTLS、Naive 和 Snell 上游仅使用 sing-box，SSR/SSD 暂不支持。自动核心会计算服务端入站和上游协议的能力交集。链式路由不生成直连备用出口，上游不可用时连接失败，不会泄露入口服务器出口 IP。来源变更不会自动同步，需要重新选择来源并执行“更新配置”。完整配置、兼容表和排查步骤见[代理部署文档](docs/PROXY_DEPLOYMENT.md#单级链式代理)。
+
 ### 版本更新说明
 
-当前版本 `1.0.13`：部署 JSON 接口增加分接口请求体大小保护，已登录后台操作不限制次数，Agent 心跳和回调继续使用独立保护；新部署的 TLS/Reality 默认服务器名称改为 `www.cloudflare.com`，提升 AWS 等云服务器的握手兼容性；修复卸载后 Agent 仍运行的问题；更新版本后会实际重载 Agent 并立即回报新 Runtime 心跳；增加已校验的历史 Runtime Manifest，可安全回退到 `1.0.9`；增加主控地址不一致和远程命令等待状态提示。
+当前版本 `1.0.18`：修复 sing-box 链式 Reality 上游缺少 uTLS 客户端配置导致核心配置校验失败；默认使用 Chrome 指纹，并保留上游节点提供的客户端指纹。
 
 服务器主控部署的完整说明已整合在本 README 的[服务器部署](#服务器部署)章节，架构说明见[总体架构](docs/ARCHITECTURE.md)。
 
